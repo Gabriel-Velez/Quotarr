@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111827">
+    <title>Quotarr</title>
+    <link rel="icon" type="image/png" href="/quotarr.png">
+    <link rel="stylesheet" href="/styles.css?v=20261122-1601">
+    <script src="/app.js?v=20261122-1556" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Quotarr home">
+          <img class="brand-logo" src="/quotarr.png" alt="">
+          <span>Quotarr</span>
+        </a>
+        <button id="mobile-menu-toggle" class="mobile-menu-toggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="header-menu" hidden>
+          <span class="hamburger-icon" aria-hidden="true"></span>
+        </button>
+        <div id="header-menu" class="header-menu">
+          <nav id="navigation" class="tabs" aria-label="Main navigation" hidden>
+            <button class="tab active" data-view="dashboard">Overview</button>
+            <button id="settings-tab" class="tab" data-view="settings" hidden>Settings</button>
+          </nav>
+          <div id="user-session" class="user-session" hidden>
+            <div class="user-session-group">
+              <button id="logout-button" class="button button-quiet">Sign out</button>
+              <span id="user-name"></span>
+            </div>
+          </div>
+          <div id="refresh-group" class="refresh-group" hidden>
+            <button id="refresh-button" class="button button-quiet">↻ <span>Refresh</span></button>
+            <span id="last-updated" class="updated-label">Not synced yet</span>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section id="login-view">
+          <form id="login-form" class="login-card">
+            <p class="eyebrow">QUOTARR</p>
+            <h1>Sign in with Jellyfin</h1>
+            <p class="subheading">Use the same Jellyfin account you use to sign in to Seerr.</p>
+            <div id="login-notice" class="notice" role="status" hidden></div>
+            <label for="login-username">Jellyfin username</label>
+            <input id="login-username" name="username" autocomplete="username" required maxlength="255">
+            <label for="login-password">Password</label>
+            <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="2048">
+            <button id="login-button" class="button button-primary button-wide" type="submit">Sign in</button>
+            <p class="login-footnote">Authentication is verified by Seerr. Passwords are not stored by Quotarr.</p>
+          </form>
+        </section>
+
+        <section id="dashboard-view" hidden>
+          <div id="notice" class="notice" role="status" hidden></div>
+          <div id="summary" class="summary-grid"></div>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">BY PROFILE</p>
+              <h2>Library footprint</h2>
+            </div>
+            <p class="hint">Hover over a bar thumbnail for file details.</p>
+          </div>
+          <div id="profiles" class="profiles"></div>
+          <div id="empty-state" class="empty-state" hidden>
+            <div class="empty-icon">▤</div>
+            <h2>Connect your media services</h2>
+            <p>Add the service URLs and API keys in Settings to start tallying your library.</p>
+            <button class="button button-primary" data-go-settings>Open settings</button>
+          </div>
+        </section>
+
+        <section id="settings-view" hidden>
+          <div class="hero">
+            <div>
+              <p class="eyebrow">CONNECTIONS & PROFILES</p>
+              <h1>Settings</h1>
+              <p class="subheading">Connect your services and set a storage allowance for each profile.</p>
+            </div>
+          </div>
+          <div id="settings-notice" class="notice" role="status" hidden></div>
+          <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+            <button class="settings-tab active" data-settings-section="connections" type="button">Connections & caps</button>
+            <button class="settings-tab" data-settings-section="reassign" type="button">Reassign media</button>
+          </div>
+          <div id="settings-connections">
+          <form id="settings-form" class="settings-layout">
+            <div class="settings-main">
+              <section class="panel">
+                <div class="panel-heading">
+                  <div><p class="eyebrow">SERVICE CONNECTIONS</p><h2>API endpoints</h2></div>
+                </div>
+                <p class="form-intro">Enter the base URLs reachable from this computer. API keys stay on this server and are never sent to the browser.</p>
+                <div class="service-grid">
+                  <div class="service-card">
+                    <label for="seerr-url">Seerr URL</label>
+                    <input id="seerr-url" name="seerr-url" type="url" placeholder="http://localhost:5055" autocomplete="url">
+                    <label for="seerr-key">API key</label>
+                    <input id="seerr-key" name="seerr-key" type="password" placeholder="Leave blank to keep saved key" autocomplete="new-password">
+                    <p id="seerr-status" class="service-status">Not configured</p>
+                  </div>
+                  <div class="service-card">
+                    <label for="radarr-url">Radarr URL</label>
+                    <input id="radarr-url" name="radarr-url" type="url" placeholder="http://localhost:7878" autocomplete="url">
+                    <label for="radarr-key">API key</label>
+                    <input id="radarr-key" name="radarr-key" type="password" placeholder="Leave blank to keep saved key" autocomplete="new-password">
+                    <p id="radarr-status" class="service-status">Not configured</p>
+                  </div>
+                  <div class="service-card">
+                    <label for="sonarr-url">Sonarr URL</label>
+                    <input id="sonarr-url" name="sonarr-url" type="url" placeholder="http://localhost:8989" autocomplete="url">
+                    <label for="sonarr-key">API key</label>
+                    <input id="sonarr-key" name="sonarr-key" type="password" placeholder="Leave blank to keep saved key" autocomplete="new-password">
+                    <p id="sonarr-status" class="service-status">Not configured</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-heading">
+                  <div><p class="eyebrow">PROFILE ALLOWANCES</p><h2>Storage caps</h2></div>
+                  <span id="profile-count" class="count-pill">0 profiles</span>
+                </div>
+                <p class="form-intro">Profiles are imported from Seerr. Leave a cap at 0 for no limit.</p>
+                <div id="cap-list" class="cap-list">
+                  <p class="muted">Save service connections and sync to load Seerr profiles.</p>
+                </div>
+              </section>
+            </div>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">UNREQUESTED MEDIA</p><h2>Default category</h2></div>
+              </div>
+              <p class="form-intro">Anything in Radarr or Sonarr without a matching Seerr request goes here.</p>
+              <div class="default-category-fields">
+                <label class="filter-field" for="default-category">Category name
+                  <input id="default-category" maxlength="60" required value="Unrequested">
+                </label>
+                <label class="filter-field">Entries per profile page
+                  <select id="page-size">
+                    <option value="10">10</option>
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+            <div class="settings-actions">
+              <button id="save-settings" class="button button-primary" type="submit">Save settings</button>
+              <button id="sync-settings" class="button button-secondary" type="button">Save & sync profiles</button>
+            </div>
+          </form>
+          </div>
+          <section id="settings-reassign" class="panel reassign-settings" hidden>
+            <div class="panel-heading">
+              <div><p class="eyebrow">LIBRARY ASSIGNMENTS</p><h2>Find and reassign media</h2></div>
+              <span id="reassign-count" class="count-pill">0 titles</span>
+            </div>
+            <div class="reassign-filters">
+              <label class="filter-field search-field">Search titles
+                <input id="reassign-search" type="search" placeholder="Search by title">
+              </label>
+              <label class="filter-field">Requested by
+                <select id="reassign-requester"><option value="all">Everyone</option></select>
+              </label>
+              <label class="filter-field">Media type
+                <select id="reassign-type">
+                  <option value="all">Movies & shows</option>
+                  <option value="Movie">Movies</option>
+                  <option value="Show">Shows</option>
+                </select>
+              </label>
+              <label class="filter-field">Sort by
+                <select id="reassign-sort">
+                  <option value="date-newest">Date added · newest</option>
+                  <option value="date-oldest">Date added · oldest</option>
+                  <option value="size-biggest">Size · biggest</option>
+                  <option value="size-smallest">Size · smallest</option>
+                </select>
+              </label>
+            </div>
+            <div class="bulk-reassign-toolbar">
+              <label class="bulk-select-all">
+                <input id="select-filtered" type="checkbox">
+                <span>Select all filtered</span>
+              </label>
+              <span id="bulk-selected-count" class="bulk-selected-count">0 selected</span>
+              <label class="filter-field bulk-target">Reassign selected to
+                <select id="bulk-profile">
+                  <option value="">Choose a profile</option>
+                </select>
+              </label>
+              <button id="bulk-assign-button" class="button button-primary" type="button" disabled>Reassign selected</button>
+              <button id="clear-selection" class="button button-secondary" type="button" disabled>Clear</button>
+            </div>
+            <div id="reassign-list" class="media-list reassign-list"></div>
+          </section>
+        </section>
+      </main>
+      <footer>Quotarr <span>·</span> Private by design</footer>
+    </div>
+    <aside id="hover-card" class="hover-card" aria-hidden="true" hidden></aside>
+  </body>
+</html>

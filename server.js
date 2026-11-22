@@ -1,0 +1,527 @@
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const http = require('node:http');
+const crypto = require('node:crypto');
+const { buildInventory } = require('./lib');
+
+const ROOT = __dirname;
+const DATA_DIR = process.env.STORAGE_TALLY_DATA_DIR
+  ? path.resolve(process.env.STORAGE_TALLY_DATA_DIR)
+  : path.join(ROOT, 'data');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const PUBLIC_DIR = path.join(ROOT, 'public');
+const PORT = process.env.PORT ? Number(process.env.PORT) : 4173;
+const HOST = process.env.HOST || '127.0.0.1';
+const ALLOWED_HOSTS = new Set((process.env.ALLOWED_HOSTS || 'localhost,127.0.0.1,[::1]').split(',').map((host) => host.trim()).filter(Boolean));
+const SESSION_COOKIE = 'storage_tally_session';
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const ADMIN_PERMISSION = 2;
+const sessions = new Map();
+const loginAttempts = new Map();
+const DEFAULTS = {
+  services: {
+    seerr: { url: '', apiKey: '' },
+    radarr: { url: '', apiKey: '' },
+    sonarr: { url: '', apiKey: '' },
+  },
+  defaultCategory: 'Unrequested',
+  caps: {},
+  assignments: {},
+  profileOrder: [],
+  pageSize: 25,
+};
+
+let settings = { ...DEFAULTS };
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function loadSettings() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  try {
+    const saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
+    settings = {
+      ...DEFAULTS,
+      ...saved,
+      services: { ...DEFAULTS.services, ...saved.services },
+      caps: saved.caps || {},
+      assignments: saved.assignments || {},
+      profileOrder: Array.isArray(saved.profileOrder)
+        ? [...new Set(saved.profileOrder.map(String).filter((id) => id && id !== 'default' && id.length <= 100))].slice(0, 20000)
+        : DEFAULTS.profileOrder,
+      pageSize: [10, 25, 50, 100].includes(Number(saved.pageSize)) ? Number(saved.pageSize) : DEFAULTS.pageSize,
+    };
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    await saveSettings(settings);
+  }
+}
+
+async function saveSettings(next) {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const tempFile = `${SETTINGS_FILE}.tmp`;
+  await fs.writeFile(tempFile, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await fs.rename(tempFile, SETTINGS_FILE);
+}
+
+function safeSettings() {
+  return {
+    services: Object.fromEntries(
+      Object.entries(settings.services).map(([name, service]) => [
+        name,
+        { url: service.url, configured: Boolean(service.apiKey) },
+      ]),
+    ),
+    defaultCategory: settings.defaultCategory,
+    caps: settings.caps,
+    pageSize: settings.pageSize,
+  };
+}
+
+function validateUrl(value, label) {
+  if (!value) return '';
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${label} URL must be a valid http:// or https:// address.`);
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error(`${label} URL must use http:// or https:// and must not contain credentials, a query, or a fragment.`);
+  }
+  return url.toString().replace(/\/+$/, '');
+}
+
+function jsonResponse(response, status, value) {
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  response.end(JSON.stringify(value));
+}
+
+function profileForClient(user) {
+  const permissions = Number(user.permissions) || 0;
+  return {
+    id: String(user.id),
+    name: user.username || user.jellyfinUsername || user.plexUsername || user.email || `User ${user.id}`,
+    isAdmin: (permissions & ADMIN_PERMISSION) === ADMIN_PERMISSION,
+  };
+}
+
+function sessionCookieId(request) {
+  const prefix = `${SESSION_COOKIE}=`;
+  const cookie = (request.headers.cookie || '').split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : '';
+}
+
+function setSessionCookie(response, id) {
+  response.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(id)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`);
+}
+
+function clearSessionCookie(response) {
+  response.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+}
+
+function checkLoginRateLimit(request) {
+  const key = request.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const recent = (loginAttempts.get(key) || []).filter((timestamp) => now - timestamp < 15 * 60 * 1000);
+  if (recent.length >= 8) throw new HttpError(429, 'Too many sign-in attempts. Try again in 15 minutes.');
+  recent.push(now);
+  loginAttempts.set(key, recent);
+}
+
+async function getSeerrUser(cookie) {
+  const service = settings.services.seerr;
+  let response;
+  try {
+    response = await fetch(`${service.url}/api/v1/auth/me`, {
+      headers: { Cookie: cookie, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch {
+    throw new HttpError(502, 'Unable to validate your Seerr session. Check the Seerr connection.');
+  }
+  if (response.status === 401 || response.status === 403) return null;
+  if (!response.ok) throw new HttpError(502, `Seerr could not validate the session (HTTP ${response.status}).`);
+  try {
+    const user = await response.json();
+    return user.id == null ? null : user;
+  } catch {
+    throw new HttpError(502, 'Seerr returned an invalid sign-in response.');
+  }
+}
+
+async function signInWithJellyfin(request, response) {
+  checkLoginRateLimit(request);
+  const body = await readJson(request);
+  const username = String(body.username || '').trim();
+  const password = String(body.password || '');
+  if (!username || !password || username.length > 255 || password.length > 2048) {
+    throw new HttpError(400, 'Enter your Jellyfin username and password.');
+  }
+  const seerr = settings.services.seerr;
+  if (!seerr.url) throw new HttpError(503, 'Seerr has not been configured by an administrator.');
+
+  let loginResponse;
+  try {
+    loginResponse = await fetch(`${seerr.url}/api/v1/auth/jellyfin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ username, password }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new HttpError(502, 'Could not reach Seerr to sign in. Check that Seerr is online.');
+  }
+  if (!loginResponse.ok) {
+    throw new HttpError(401, 'Seerr rejected this Jellyfin sign-in. Check the credentials and that Jellyfin login is enabled in Seerr.');
+  }
+  await loginResponse.arrayBuffer();
+
+  const setCookies = typeof loginResponse.headers.getSetCookie === 'function'
+    ? loginResponse.headers.getSetCookie()
+    : [loginResponse.headers.get('set-cookie')].filter(Boolean);
+  const seerrCookie = setCookies.map((value) => value.split(';', 1)[0].trim()).filter((value) => value.includes('=')).join('; ');
+  if (!seerrCookie) throw new HttpError(502, 'Seerr authenticated the account but did not establish a session.');
+
+  const user = await getSeerrUser(seerrCookie);
+  if (!user) throw new HttpError(401, 'Seerr did not confirm the signed-in account.');
+  const id = crypto.randomBytes(32).toString('base64url');
+  sessions.set(id, { cookie: seerrCookie, user, expiresAt: Date.now() + SESSION_TTL_MS });
+  loginAttempts.delete(request.socket.remoteAddress || 'unknown');
+  setSessionCookie(response, id);
+  return profileForClient(user);
+}
+
+async function resolveSession(request) {
+  const id = sessionCookieId(request);
+  const session = id && sessions.get(id);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    sessions.delete(id);
+    return null;
+  }
+  const user = await getSeerrUser(session.cookie);
+  if (!user) {
+    sessions.delete(id);
+    return null;
+  }
+  session.user = user;
+  session.expiresAt = Date.now() + SESSION_TTL_MS;
+  return { id, user, profile: profileForClient(user) };
+}
+
+async function readJson(request) {
+  if (!request.headers['content-type']?.startsWith('application/json')) {
+    throw new HttpError(415, 'Send request data as application/json.');
+  }
+  let raw = '';
+  for await (const chunk of request) {
+    raw += chunk;
+    if (raw.length > 64 * 1024) throw new Error('Request body is too large.');
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error('Request body must be valid JSON.');
+  }
+}
+
+async function serviceJson(serviceName, apiPath) {
+  const service = settings.services[serviceName];
+  if (!service.url || !service.apiKey) {
+    throw new Error(`Configure the ${serviceName[0].toUpperCase()}${serviceName.slice(1)} URL and API key in Settings.`);
+  }
+  let response;
+  try {
+    response = await fetch(`${service.url}${apiPath}`, {
+      headers: { 'X-Api-Key': service.apiKey, Accept: 'application/json' },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new Error(`Could not connect to ${serviceName}. Check its URL and that it is reachable from this machine.`);
+  }
+  if (!response.ok) {
+    throw new Error(`${serviceName[0].toUpperCase()}${serviceName.slice(1)} returned HTTP ${response.status}. Check its URL and API key.`);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`${serviceName[0].toUpperCase()}${serviceName.slice(1)} returned an invalid response.`);
+  }
+}
+
+async function fetchRequests() {
+  const all = [];
+  const take = 100;
+  for (let skip = 0; skip < 20000; skip += take) {
+    const page = await serviceJson('seerr', `/api/v1/request?take=${take}&skip=${skip}&filter=all&sort=added&sortDirection=asc`);
+    const results = Array.isArray(page) ? page : page.results;
+    if (!Array.isArray(results)) throw new Error('Seerr returned requests in an unexpected format.');
+    all.push(...results);
+    const total = Number(page.pageInfo?.results);
+    if (results.length < take || (Number.isFinite(total) && all.length >= total)) break;
+    if (skip + take >= 20000) throw new Error('Seerr has more than 20,000 requests; the sync limit was reached.');
+  }
+  return all;
+}
+
+async function fetchUsers() {
+  const all = [];
+  const take = 100;
+  for (let skip = 0; skip < 20000; skip += take) {
+    const page = await serviceJson('seerr', `/api/v1/user?take=${take}&skip=${skip}&sort=displayname&sortDirection=asc`);
+    const results = Array.isArray(page) ? page : page.results;
+    if (!Array.isArray(results)) throw new Error('Seerr returned users in an unexpected format.');
+    all.push(...results);
+    const total = Number(page.pageInfo?.results);
+    if (results.length < take || (Number.isFinite(total) && all.length >= total)) break;
+    if (skip + take >= 20000) throw new Error('Seerr has more than 20,000 profiles; the sync limit was reached.');
+  }
+  return all;
+}
+
+async function getDashboard() {
+  const [users, requests, movies, series] = await Promise.all([
+    fetchUsers(),
+    fetchRequests(),
+    serviceJson('radarr', '/api/v3/movie'),
+    serviceJson('sonarr', '/api/v3/series'),
+  ]);
+  if (!Array.isArray(movies) || !Array.isArray(series)) {
+    throw new Error('One of the services returned data in an unexpected format.');
+  }
+  const inventory = buildInventory({
+    movies,
+    series,
+    requests,
+    users,
+    assignments: settings.assignments,
+    defaultCategory: settings.defaultCategory,
+  });
+  const profileOrder = new Map(settings.profileOrder.map((id, index) => [id, index]));
+  const profiles = inventory.profiles.filter((profile) => profile.id !== 'default');
+  profiles.sort((a, b) => {
+    const aOrder = profileOrder.get(a.id);
+    const bOrder = profileOrder.get(b.id);
+    if (aOrder == null && bOrder == null) return 0;
+    if (aOrder == null) return 1;
+    if (bOrder == null) return -1;
+    return aOrder - bOrder;
+  });
+  const defaultProfile = inventory.profiles.find((profile) => profile.id === 'default');
+  return {
+    ...inventory,
+    profiles: defaultProfile ? [...profiles, defaultProfile] : profiles,
+    caps: settings.caps,
+    pageSize: settings.pageSize,
+  };
+}
+
+async function saveClientSettings(request) {
+  const body = await readJson(request);
+  const services = {};
+  for (const name of ['seerr', 'radarr', 'sonarr']) {
+    const submitted = body.services?.[name] || {};
+    services[name] = {
+      url: validateUrl(String(submitted.url || '').trim(), name),
+      apiKey: String(submitted.apiKey || '').trim() || settings.services[name].apiKey,
+    };
+  }
+  const defaultCategory = String(body.defaultCategory || '').trim();
+  if (!defaultCategory || defaultCategory.length > 60) {
+    throw new Error('Default category must contain between 1 and 60 characters.');
+  }
+  const caps = {};
+  for (const [profileId, value] of Object.entries(body.caps || {})) {
+    if (profileId.length > 100) continue;
+    const cap = Number(value);
+    if (Number.isFinite(cap) && cap >= 0) caps[profileId] = cap;
+  }
+  const pageSize = [10, 25, 50, 100].includes(Number(body.pageSize)) ? Number(body.pageSize) : settings.pageSize;
+  settings = { ...settings, services, defaultCategory, caps, pageSize };
+  await saveSettings(settings);
+  return safeSettings();
+}
+
+async function saveAssignment(request) {
+  const body = await readJson(request);
+  const key = String(body.key || '');
+  const profileId = String(body.profileId || '');
+  if (!key || key.length > 200 || !profileId || profileId.length > 100) {
+    throw new Error('A media item and profile are required.');
+  }
+  settings.assignments = { ...settings.assignments, [key]: profileId };
+  await saveSettings(settings);
+}
+
+async function saveBulkAssignment(request) {
+  const body = await readJson(request);
+  const profileId = String(body.profileId || '');
+  if (!Array.isArray(body.keys) || body.keys.length === 0 || body.keys.length > 1000
+    || !profileId || profileId.length > 100) {
+    throw new Error('Choose a destination profile and at least one media item (up to 1,000).');
+  }
+  const keys = new Set();
+  for (const key of body.keys) {
+    if (typeof key !== 'string' || !key || key.length > 200) {
+      throw new Error('The selected media list contains an invalid key.');
+    }
+    keys.add(key);
+  }
+  const assignments = { ...settings.assignments };
+  keys.forEach((key) => { assignments[key] = profileId; });
+  const nextSettings = { ...settings, assignments };
+  await saveSettings(nextSettings);
+  settings = nextSettings;
+  return keys.size;
+}
+
+async function saveProfileOrder(request) {
+  const body = await readJson(request);
+  if (!Array.isArray(body.order) || body.order.length > 20000) {
+    throw new Error('Profile order must be a list of at most 20,000 profile IDs.');
+  }
+  const seen = new Set();
+  const profileOrder = [];
+  for (const rawId of body.order) {
+    const id = String(rawId);
+    if (!id || id.length > 100 || id === 'default') {
+      throw new Error('Profile order contains an invalid profile ID.');
+    }
+    if (!seen.has(id)) {
+      seen.add(id);
+      profileOrder.push(id);
+    }
+  }
+  settings = { ...settings, profileOrder };
+  await saveSettings(settings);
+  return profileOrder;
+}
+
+async function serveStatic(request, response, pathname) {
+  const relativePath = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+  const filePath = path.resolve(PUBLIC_DIR, relativePath);
+  if (!filePath.startsWith(`${PUBLIC_DIR}${path.sep}`) && filePath !== path.join(PUBLIC_DIR, 'index.html')) {
+    response.writeHead(404);
+    response.end('Not found');
+    return;
+  }
+  try {
+    const body = await fs.readFile(filePath);
+    const contentType = {
+      '.html': 'text/html; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.js': 'text/javascript; charset=utf-8',
+    }[path.extname(filePath)] || 'application/octet-stream';
+    response.writeHead(200, {
+      'Content-Type': contentType,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'self' https://image.tmdb.org; img-src 'self' https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'",
+    });
+    response.end(body);
+  } catch {
+    response.writeHead(404);
+    response.end('Not found');
+  }
+}
+
+function requireSession(session) {
+  if (!session) throw new HttpError(401, 'Sign in with your Jellyfin account to continue.');
+  return session;
+}
+
+function requireAdmin(session) {
+  if (!session.profile.isAdmin) throw new HttpError(403, 'Only Seerr administrators can change settings or reassign media.');
+}
+
+const server = http.createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+    if (url.pathname.startsWith('/api/')) {
+      const host = new URL(`http://${request.headers.host || ''}`).hostname;
+      if (!ALLOWED_HOSTS.has(host)) {
+        return jsonResponse(response, 403, { error: 'This host is not allowed. Configure ALLOWED_HOSTS to match the dashboard address.' });
+      }
+      if (request.headers.origin && request.headers.origin !== `http://${request.headers.host}` && request.headers.origin !== `https://${request.headers.host}`) {
+        return jsonResponse(response, 403, { error: 'Cross-origin API requests are not allowed.' });
+      }
+    }
+    if (request.method === 'GET' && url.pathname === '/api/session') {
+      const session = await resolveSession(request);
+      if (!session) clearSessionCookie(response);
+      return jsonResponse(response, 200, { authenticated: Boolean(session), user: session?.profile || null });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/login') {
+      const user = await signInWithJellyfin(request, response);
+      return jsonResponse(response, 200, { authenticated: true, user });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/logout') {
+      const id = sessionCookieId(request);
+      if (id) sessions.delete(id);
+      clearSessionCookie(response);
+      return jsonResponse(response, 200, { ok: true });
+    }
+    const session = url.pathname.startsWith('/api/') ? requireSession(await resolveSession(request)) : null;
+    if (request.method === 'GET' && url.pathname === '/api/settings') {
+      requireAdmin(session);
+      return jsonResponse(response, 200, safeSettings());
+    }
+    if (request.method === 'POST' && url.pathname === '/api/settings') {
+      requireAdmin(session);
+      return jsonResponse(response, 200, await saveClientSettings(request));
+    }
+    if (request.method === 'GET' && url.pathname === '/api/dashboard') {
+      return jsonResponse(response, 200, await getDashboard());
+    }
+    if (request.method === 'POST' && url.pathname === '/api/assign') {
+      requireAdmin(session);
+      await saveAssignment(request);
+      return jsonResponse(response, 200, { ok: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/assign-bulk') {
+      requireAdmin(session);
+      const assigned = await saveBulkAssignment(request);
+      return jsonResponse(response, 200, { assigned });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/profile-order') {
+      requireAdmin(session);
+      const profileOrder = await saveProfileOrder(request);
+      return jsonResponse(response, 200, { profileOrder });
+    }
+    if (url.pathname.startsWith('/api/')) return jsonResponse(response, 404, { error: 'Not found.' });
+    if (request.method !== 'GET') return jsonResponse(response, 405, { error: 'Method not allowed.' });
+    return await serveStatic(request, response, url.pathname);
+  } catch (error) {
+    const status = error.status || (error.message.includes('too large') ? 413 : 400);
+    return jsonResponse(response, status, { error: error.message || 'The request could not be completed.' });
+  }
+});
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (session.expiresAt <= now) sessions.delete(id);
+  }
+}, 60 * 60 * 1000).unref();
+
+if (require.main === module) {
+  loadSettings()
+    .then(() => server.listen(PORT, HOST, () => {
+      console.log(`Quotarr listening at http://${HOST}:${PORT}`);
+    }))
+    .catch((error) => {
+      console.error(`Could not load local settings: ${error.message}`);
+      process.exitCode = 1;
+    });
+}
+
+module.exports = { loadSettings, server };
