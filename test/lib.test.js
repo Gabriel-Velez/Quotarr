@@ -48,6 +48,62 @@ test('manual assignments override requests, while unknown saved profile ids are 
   assert.equal(invalidOverride.items[0].profileId, '7');
 });
 
+test('admin reassignment overrides both library and request-history profiles', () => {
+  const result = buildInventory({
+    users: [{ id: 7, username: 'Alex' }, { id: 8, username: 'Sam' }],
+    requests: [{ id: 101, type: 'movie', media: { tmdbId: 42 }, requestedBy: { id: 7 } }],
+    movies: [{ id: 1, tmdbId: 42, title: 'Title', sizeOnDisk: 1 }],
+    series: [],
+    assignments: { 'movie:42': '8' },
+    reassignments: { 'movie:42': { seerrProfileId: '7', adminProfileId: '8' } },
+    defaultCategory: 'Unrequested',
+  });
+
+  assert.equal(result.items[0].profileId, '8');
+  assert.equal(result.requests[0].profileId, '8');
+});
+
+test('manually assigned library media appears in profile history without a Seerr request', () => {
+  const result = buildInventory({
+    users: [{ id: 7, username: 'Alex' }, { id: 8, username: 'Derek' }],
+    requests: [],
+    movies: [{ id: 1, tmdbId: 42, title: 'Unrequested Movie', sizeOnDisk: 1 }],
+    series: [],
+    assignments: { 'movie:42': '8' },
+    reassignments: { 'movie:42': { seerrProfileId: null, adminProfileId: '8' } },
+    defaultCategory: 'Unrequested',
+  });
+
+  assert.deepEqual(result.requests.map(({ profileId, title, manuallyAssigned }) => ({
+    profileId, title, manuallyAssigned,
+  })), [{
+    profileId: '8',
+    title: 'Unrequested Movie',
+    manuallyAssigned: true,
+  }]);
+});
+
+test('all Seerr requests for a library title follow its single bar-scroll profile', () => {
+  const result = buildInventory({
+    users: [{ id: 7, username: 'Derek' }, { id: 8, username: 'Teevo' }],
+    requests: [
+      { id: 101, type: 'movie', media: { tmdbId: 42 }, requestedBy: { id: 7 } },
+      { id: 102, type: 'movie', media: { tmdbId: 42 }, requestedBy: { id: 8 } },
+    ],
+    movies: [{ id: 1, tmdbId: 42, title: 'The Odyssey', sizeOnDisk: 1 }],
+    series: [],
+    assignments: { 'movie:42': '8' },
+    reassignments: { 'movie:42': { seerrProfileId: '7', adminProfileId: '8' } },
+    defaultCategory: 'Unrequested',
+  });
+
+  assert.equal(result.items[0].profileId, '8');
+  assert.equal(result.requests.length, 1);
+  assert.equal(result.requests[0].profileId, '8');
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items.reduce((total, item) => total + item.size, 0), 1);
+});
+
 test('profile names and request keys handle alternate account names and missing IDs', () => {
   assert.equal(profileName({ id: 12, plexUsername: 'Plex Alex' }), 'Plex Alex');
   assert.equal(requestKey('movie', { tmdbId: 1 }), 'movie:1');

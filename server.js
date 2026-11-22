@@ -2,7 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
-const { buildInventory } = require('./lib');
+const { buildInventory, requestKey } = require('./lib');
 
 const ROOT = __dirname;
 const DATA_DIR = process.env.STORAGE_TALLY_DATA_DIR
@@ -27,6 +27,7 @@ const DEFAULTS = {
   defaultCategory: 'Unrequested',
   caps: {},
   assignments: {},
+  reassignments: {},
   profileOrder: [],
   pageSize: 25,
 };
@@ -50,6 +51,7 @@ async function loadSettings() {
       services: { ...DEFAULTS.services, ...saved.services },
       caps: saved.caps || {},
       assignments: saved.assignments || {},
+      reassignments: saved.reassignments || {},
       profileOrder: Array.isArray(saved.profileOrder)
         ? [...new Set(saved.profileOrder.map(String).filter((id) => id && id !== 'default' && id.length <= 100))].slice(0, 20000)
         : DEFAULTS.profileOrder,
@@ -304,6 +306,7 @@ async function getDashboard() {
     requests,
     users,
     assignments: settings.assignments,
+    reassignments: settings.reassignments,
     defaultCategory: settings.defaultCategory,
   });
   const profileOrder = new Map(settings.profileOrder.map((id, index) => [id, index]));
@@ -351,6 +354,29 @@ async function saveClientSettings(request) {
   return safeSettings();
 }
 
+async function saveAssignments(keys, profileId) {
+  const requests = await fetchRequests();
+  const seerrProfiles = new Map();
+  for (const request of requests) {
+    const key = requestKey(request.type, request.media);
+    if (key && !seerrProfiles.has(key)) {
+      seerrProfiles.set(key, request.requestedBy?.id == null ? null : String(request.requestedBy.id));
+    }
+  }
+  const assignments = { ...settings.assignments };
+  const reassignments = { ...settings.reassignments };
+  keys.forEach((key) => {
+    assignments[key] = profileId;
+    reassignments[key] = {
+      seerrProfileId: reassignments[key]?.seerrProfileId ?? seerrProfiles.get(key) ?? null,
+      adminProfileId: profileId,
+    };
+  });
+  const nextSettings = { ...settings, assignments, reassignments };
+  await saveSettings(nextSettings);
+  settings = nextSettings;
+}
+
 async function saveAssignment(request) {
   const body = await readJson(request);
   const key = String(body.key || '');
@@ -358,8 +384,7 @@ async function saveAssignment(request) {
   if (!key || key.length > 200 || !profileId || profileId.length > 100) {
     throw new Error('A media item and profile are required.');
   }
-  settings.assignments = { ...settings.assignments, [key]: profileId };
-  await saveSettings(settings);
+  await saveAssignments([key], profileId);
 }
 
 async function saveBulkAssignment(request) {
@@ -376,11 +401,7 @@ async function saveBulkAssignment(request) {
     }
     keys.add(key);
   }
-  const assignments = { ...settings.assignments };
-  keys.forEach((key) => { assignments[key] = profileId; });
-  const nextSettings = { ...settings, assignments };
-  await saveSettings(nextSettings);
-  settings = nextSettings;
+  await saveAssignments(keys, profileId);
   return keys.size;
 }
 

@@ -148,9 +148,10 @@ function renderSummary(profiles, items, requests) {
   const requested = items.filter((item) => item.profileId !== 'default').length;
   const movies = items.filter((item) => item.type === 'Movie').length;
   const shows = items.length - movies;
+  const seerrRequests = requests.filter((request) => !request.manuallyAssigned);
   byId('summary').replaceChildren(
     summaryCard('Total storage', formatBytes(total), `${items.length} titles in the library`, '◩'),
-    summaryCard('Requested', String(requests.length), `Across ${Math.max(profiles.length - 1, 0)} Seerr profiles`, '◎'),
+    summaryCard('Requested', String(seerrRequests.length), `Across ${Math.max(profiles.length - 1, 0)} Seerr profiles`, '◎'),
     summaryCard('Movies & shows', `${movies} / ${shows}`, 'From Radarr and Sonarr', '▧'),
   );
 }
@@ -479,7 +480,9 @@ function makeRequestRow(entry) {
   const name = document.createElement('strong');
   name.textContent = entry.title;
   const meta = document.createElement('span');
-  meta.textContent = `${entry.type} · ${entry.inLibrary ? 'In library' : 'Not downloaded'}`;
+  meta.textContent = entry.manuallyAssigned
+    ? `${entry.type} · Manually assigned · No Seerr request`
+    : `${entry.type} · ${entry.inLibrary ? 'In library' : 'Not downloaded'}`;
   title.append(name, meta);
   primary.append(title);
   const requestDate = document.createElement('span');

@@ -32,7 +32,7 @@ function posterUrl(mediaPoster, serviceImages) {
   return '';
 }
 
-function buildInventory({ movies, series, requests, users, assignments, defaultCategory }) {
+function buildInventory({ movies, series, requests, users, assignments, reassignments = {}, defaultCategory }) {
   const profiles = users.map((user) => ({
     id: String(user.id),
     name: profileName(user),
@@ -40,6 +40,13 @@ function buildInventory({ movies, series, requests, users, assignments, defaultC
   profiles.push({ id: 'default', name: defaultCategory });
 
   const profileIds = new Set(profiles.map((profile) => profile.id));
+  const assignedProfile = (key) => {
+    const recordedProfile = reassignments[key]?.adminProfileId;
+    const profileId = typeof recordedProfile === 'string' && profileIds.has(recordedProfile)
+      ? recordedProfile
+      : assignments[key];
+    return profileId && profileIds.has(profileId) ? profileId : null;
+  };
   const requestByMedia = new Map();
   for (const request of requests) {
     const key = requestKey(request.type, request.media);
@@ -78,8 +85,8 @@ function buildInventory({ movies, series, requests, users, assignments, defaultC
   ].map((item) => {
     const request = requestByMedia.get(item.matchKey);
     const inferredProfile = request?.profileId;
-    const savedProfile = assignments[item.key];
-    const profileId = savedProfile && profileIds.has(savedProfile)
+    const savedProfile = assignedProfile(item.key);
+    const profileId = savedProfile
       ? savedProfile
       : inferredProfile && profileIds.has(inferredProfile)
         ? inferredProfile
@@ -97,12 +104,22 @@ function buildInventory({ movies, series, requests, users, assignments, defaultC
   });
 
   const mediaByKey = new Map(items.filter((item) => item.matchKey).map((item) => [item.matchKey, item]));
-  const requestEntries = requests.map((request, index) => {
+  const requestEntries = [];
+  const seenRequests = new Set();
+  requests.forEach((request, index) => {
     const key = requestKey(request.type, request.media);
     const item = key ? mediaByKey.get(key) : undefined;
-    const profileId = request.requestedBy?.id == null ? null : String(request.requestedBy.id);
+    const inferredProfile = request.requestedBy?.id == null ? null : String(request.requestedBy.id);
+    const profileId = item
+      ? item.profileId
+      : key
+        ? assignedProfile(key) || inferredProfile
+        : inferredProfile;
     const requestId = request.id == null ? `${key || 'unknown'}:${profileId || 'unknown'}:${index}` : String(request.id);
-    return {
+    const dedupeKey = key ? `media:${key}` : `request:${requestId}`;
+    if (seenRequests.has(dedupeKey)) return;
+    seenRequests.add(dedupeKey);
+    requestEntries.push({
       id: requestId,
       profileId,
       itemKey: item?.key || key || `request:${requestId}`,
@@ -113,10 +130,27 @@ function buildInventory({ movies, series, requests, users, assignments, defaultC
       dateRequested: request.createdAt || '',
       dateReleased: item?.dateReleased || request.media?.releaseDate || request.media?.firstAirDate || '',
       inLibrary: Boolean(item),
-    };
+    });
   });
 
-  return { profiles, items, requests: requestEntries };
+  const requestedItemKeys = new Set(requestEntries.map((request) => request.itemKey));
+  const manualEntries = items
+    .filter((item) => !requestedItemKeys.has(item.key))
+    .map((item) => ({
+      id: `assignment:${item.key}`,
+      profileId: item.profileId,
+      itemKey: item.key,
+      title: item.title,
+      type: item.type,
+      size: item.size,
+      poster: item.poster,
+      dateRequested: '',
+      dateReleased: item.dateReleased,
+      inLibrary: true,
+      manuallyAssigned: true,
+    }));
+
+  return { profiles, items, requests: [...requestEntries, ...manualEntries] };
 }
 
 module.exports = { buildInventory, profileName, requestKey };

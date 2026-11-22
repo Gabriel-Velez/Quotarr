@@ -60,7 +60,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
         type: 'movie',
         createdAt: '2024-01-02T00:00:00.000Z',
         media: { tmdbId: 99, posterPath: '/movie.jpg' },
-        requestedBy: { id: 2 },
+        requestedBy: { id: 1 },
       }] });
     }
     return respond(response, 404, { error: 'not found' });
@@ -152,6 +152,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.equal(assignment.status, 200);
     const singleDashboard = await (await call('/api/dashboard', { headers: adminHeaders })).json();
     assert.equal(singleDashboard.items[0].profileId, '1');
+    assert.equal(singleDashboard.requests[0].profileId, '1');
     const bulkAssignment = await call('/api/assign-bulk', {
       method: 'POST',
       headers: { ...adminHeaders, 'Content-Type': 'application/json' },
@@ -173,6 +174,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.equal(profileOrder.status, 200);
     const dashboard = await (await call('/api/dashboard', { headers: adminHeaders })).json();
     assert.equal(dashboard.items[0].profileId, '2');
+    assert.equal(dashboard.requests[0].profileId, '2');
     assert.equal(dashboard.requests[0].size, 4096);
     assert.equal(dashboard.requests[0].dateRequested, '2024-01-02T00:00:00.000Z');
     assert.deepEqual(dashboard.profiles.map(({ id }) => id), ['2', '1', 'default']);
@@ -188,6 +190,14 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.deepEqual(JSON.parse(savedSettings).profileOrder, ['2', '1']);
     assert.equal(JSON.parse(savedSettings).assignments['movie:99'], '2');
     assert.equal(JSON.parse(savedSettings).assignments['show:123'], '2');
+    assert.deepEqual(JSON.parse(savedSettings).reassignments['movie:99'], {
+      seerrProfileId: '1',
+      adminProfileId: '2',
+    });
+    assert.deepEqual(JSON.parse(savedSettings).reassignments['show:123'], {
+      seerrProfileId: null,
+      adminProfileId: '2',
+    });
   } finally {
     if (app?.listening) await new Promise((resolve) => app.close(resolve));
     await Promise.all(mockServers.map((server) => server.listening
