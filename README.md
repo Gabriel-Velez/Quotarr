@@ -4,7 +4,8 @@ A self-hosted dashboard that groups Radarr movies and Sonarr series by their See
 
 ## Screenshots
 
-These screenshots use anonymized sample data.
+NOTE: These screenshots use anonymized sample data.
+When run it will be populated with actual movie and series images
 
 ![Quotarr storage overview](docs/screenshots/dashboard.png)
 
