@@ -1,0 +1,13 @@
+services:
+  quotarr:
+    build: .
+    ports:
+      - "${QUOTARR_BIND_ADDRESS:-127.0.0.1}:${QUOTARR_PORT:-4173}:4173"
+    environment:
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}"
+    volumes:
+      - quotarr-data:/data
+    restart: unless-stopped
+
+volumes:
+  quotarr-data:

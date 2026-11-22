@@ -20,6 +20,14 @@ When run it will be populated with actual movie and series images
 
 The app binds to `127.0.0.1` by default. Set `PORT` to change the port. Use the Jellyfin username and password associated with a Seerr account to sign in. Quotarr verifies the login through Seerr and keeps the Seerr session in memory; passwords are not stored. Seerr's admin permission is required for Settings and reassignment; other signed-in users can view the overview and request history. Sessions expire after 12 hours or when the app restarts.
 
+## Run with Docker
+
+1. Install Docker with the Compose plugin.
+2. From this folder, run `docker compose up -d --build`.
+3. Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
+
+Compose keeps settings and API keys in the persistent `quotarr-data` volume. Use `docker compose down` to stop the app; the volume is preserved. The published port binds to `127.0.0.1` by default. Configure Seerr, Radarr, and Sonarr with addresses reachable from inside the container (for example, `host.docker.internal` for services running on the Docker host). For trusted LAN access, set `QUOTARR_BIND_ADDRESS=0.0.0.0` and `ALLOWED_HOSTS` to the exact hostnames or IP addresses you will use in a `.env` file beside `compose.yaml`. Do not expose the app directly to the internet; use a trusted VPN or HTTPS reverse proxy for remote access.
+
 ## Service setup
 
 Use the base address for each service, including a reverse-proxy subpath if applicable (for example `http://media-box:7878/radarr`). Create API keys in each service's settings. The dashboard reads Seerr users and requests, Radarr movies, and Sonarr series; it does not modify those services.
