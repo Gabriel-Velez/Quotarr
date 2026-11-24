@@ -36,10 +36,25 @@ button {
 }
 .topbar {
   height: 76px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
-  border-bottom: 1px solid rgba(138, 158, 183, 0.16);
   gap: 30px;
+}
+.topbar::before {
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 100vw;
+  transform: translateX(-50%);
+  background: var(--page);
+  border-bottom: 1px solid rgba(138, 158, 183, 0.16);
+  content: "";
+  pointer-events: none;
 }
 .brand {
   display: flex;
@@ -1165,7 +1180,6 @@ footer span {
     height: 65px;
     justify-content: space-between;
     gap: 0;
-    position: relative;
   }
   .brand {
     gap: 7px;
