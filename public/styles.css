@@ -963,7 +963,21 @@ input::placeholder {
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  list-style-position: inside;
+  list-style: none;
+}
+.deleted-media-details summary::-webkit-details-marker {
+  display: none;
+}
+.deleted-media-toggle {
+  flex: 0 0 27px;
+  margin-left: 0;
+}
+.deleted-media-details[open] .deleted-media-toggle .chevron-icon {
+  margin-top: 4px;
+  transform: rotate(225deg);
+}
+.deleted-media-details summary .count-pill {
+  margin-left: auto;
 }
 .deleted-media-details[open] summary {
   margin-bottom: 10px;
@@ -1120,6 +1134,15 @@ footer span {
   }
   .bulk-reassign-toolbar {
     grid-template-columns: max-content max-content minmax(0, 1fr);
+  }
+  .delete-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .delete-toolbar > span:empty {
+    display: none;
+  }
+  .delete-toolbar .bulk-selected-count {
+    justify-self: end;
   }
   .bulk-target {
     grid-column: 1 / -1;
@@ -1316,9 +1339,6 @@ footer span {
   }
   .expand-toggle {
     margin-left: auto;
-  }
-  .media-row {
-    grid-template-columns: 32px minmax(0, 1fr) 140px;
   }
   .media-row select {
     width: 140px;
