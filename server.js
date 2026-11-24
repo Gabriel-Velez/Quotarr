@@ -26,6 +26,7 @@ const DEFAULTS = {
   },
   defaultCategory: 'Unrequested',
   caps: {},
+  profileNames: {},
   assignments: {},
   reassignments: {},
   deletedMedia: {},
@@ -56,6 +57,10 @@ async function loadSettings() {
       ...saved,
       services: { ...DEFAULTS.services, ...saved.services },
       caps: saved.caps || {},
+      profileNames: saved.profileNames && typeof saved.profileNames === 'object' && !Array.isArray(saved.profileNames)
+        ? Object.fromEntries(Object.entries(saved.profileNames)
+          .filter(([id, name]) => id && id.length <= 100 && typeof name === 'string' && name.trim().length <= 255))
+        : {},
       assignments: saved.assignments || {},
       reassignments: saved.reassignments || {},
       deletedMedia,
@@ -324,6 +329,19 @@ async function getCurrentInventory() {
     reassignments: settings.reassignments,
     defaultCategory: settings.defaultCategory,
   });
+  const profileNames = { ...(settings.profileNames || {}) };
+  let namesChanged = false;
+  inventory.profiles.filter((profile) => profile.id !== 'default').forEach((profile) => {
+    if (typeof profile.name === 'string' && profileNames[profile.id] !== profile.name) {
+      profileNames[profile.id] = profile.name;
+      namesChanged = true;
+    }
+  });
+  if (namesChanged) {
+    const nextSettings = { ...settings, profileNames };
+    await saveSettings(nextSettings);
+    settings = nextSettings;
+  }
   const arrRecords = new Map();
   movies.forEach((movie) => {
     if (movie.id != null) arrRecords.set(arrMediaKey('movie', movie), { serviceName: 'radarr', id: movie.id });

@@ -36,7 +36,7 @@ Titles are matched by TMDB ID for movies and TVDB ID for series. Multiple Seerr 
 
 Each profile's sort control orders both its dashboard poster tiles and expanded request list by date added or size. The **Reassign media** section in Settings supports title search, requester/type filters, sorting by date added or size, and bulk assignment of selected or filtered items. Dashboard poster tiles scroll horizontally when needed; hovering a tile shows its poster, title, request date, size, and release date.
 
-Profile caps are entered in GB. A blank or zero cap means unlimited. Connection settings, caps, and overrides are stored in `data/settings.json`; API keys are not returned to the browser. Keep that file private and back it up if you want to preserve settings.
+Profile caps are entered in GB. A blank or zero cap means unlimited. Connection settings, caps, and overrides are stored in `data/settings.json`; API keys are not returned to the browser. The `profileNames` map records Seerr profile IDs alongside their usernames so numeric IDs in assignments and caps are easier to identify. Quotarr refreshes this map when it syncs dashboard data. Keep that file private and back it up if you want to preserve settings.
 
 By default, the app only accepts the `localhost` and loopback hostnames. For a trusted LAN deployment, set `HOST=0.0.0.0` and `ALLOWED_HOSTS` to the exact host/IP clients will use (comma-separated if needed). Do not expose the app directly to the internet; use a trusted VPN or HTTPS reverse proxy for remote access.
 

@@ -252,6 +252,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.deepEqual(JSON.parse(savedSettings).profileOrder, ['2', '1']);
     assert.equal(JSON.parse(savedSettings).assignments['movie:99'], '2');
     assert.equal(JSON.parse(savedSettings).assignments['show:123'], '2');
+    assert.deepEqual(JSON.parse(savedSettings).profileNames, { '1': 'admin', '2': 'regular' });
     assert.deepEqual(JSON.parse(savedSettings).deletedMedia, {});
     assert.deepEqual(JSON.parse(savedSettings).reassignments['movie:99'], {
       seerrProfileId: '1',
