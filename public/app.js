@@ -34,6 +34,13 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 ** exponent)).toFixed(exponent > 1 ? 1 : 0)} ${units[exponent]}`;
 }
 
+function formatStorageCap(gigabytes) {
+  if (gigabytes >= 1000) {
+    return `${Number((gigabytes / 1000).toFixed(1))} TB`;
+  }
+  return `${gigabytes} GB`;
+}
+
 function formatDate(value) {
   if (!value) return '—';
   const date = new Date(value);
@@ -259,7 +266,8 @@ function makeProfileCard(profile, data) {
     .filter((item) => item.inLibrary && item.profileId === profile.id);
   const profileSort = state.profilePages[profile.id]?.sort || 'date-newest';
   const total = libraryItems.reduce((sum, item) => sum + item.size, 0);
-  const capBytes = Number(caps?.[profile.id]) > 0 ? Number(caps[profile.id]) * 1024 ** 3 : 0;
+  const capGb = Number(caps?.[profile.id]) || 0;
+  const capBytes = capGb > 0 ? capGb * 1024 ** 3 : 0;
   const percent = capBytes ? Math.min((total / capBytes) * 100, 100) : 0;
   const card = document.createElement('article');
   card.className = 'profile-card';
@@ -316,7 +324,7 @@ function makeProfileCard(profile, data) {
   progress.append(fill);
   const progressText = document.createElement('span');
   progressText.textContent = capBytes
-    ? `${formatBytes(total)} of ${formatBytes(capBytes)} · ${percent.toFixed(0)}%`
+    ? `${formatBytes(total)} of ${formatStorageCap(capGb)} · ${percent.toFixed(0)}%`
     : 'No storage cap set';
   progressWrap.append(progress, progressText);
 
