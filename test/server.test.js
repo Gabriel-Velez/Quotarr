@@ -24,6 +24,13 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     allowedHosts: process.env.ALLOWED_HOSTS,
   };
   const seerrSessions = new Map();
+  const radarrMovies = [
+    { id: 5, tmdbId: 99, title: 'Test Movie', sizeOnDisk: 4096, releaseDate: '2023-12-01' },
+  ];
+  const sonarrSeries = [];
+  const radarrDeletes = [];
+  const sonarrDeletes = [];
+  const failedDeleteIds = new Set([9]);
 
   const seerrServer = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
@@ -65,10 +72,22 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     }
     return respond(response, 404, { error: 'not found' });
   });
-  const radarrServer = http.createServer((request, response) => respond(response, 200, [{
-    id: 5, tmdbId: 99, title: 'Test Movie', sizeOnDisk: 4096, releaseDate: '2023-12-01',
-  }]));
-  const sonarrServer = http.createServer((request, response) => respond(response, 200, []));
+  const createArrServer = (items, deletes) => http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    if (request.method === 'DELETE') {
+      const id = Number(url.pathname.split('/').pop());
+      deletes.push({ id, deleteFiles: url.searchParams.get('deleteFiles') });
+      if (failedDeleteIds.has(id)) return respond(response, 500, { error: 'delete failed' });
+      const index = items.findIndex((item) => item.id === id);
+      if (index < 0) return respond(response, 404, { error: 'not found' });
+      items.splice(index, 1);
+      response.writeHead(200);
+      return response.end();
+    }
+    return respond(response, 200, items);
+  });
+  const radarrServer = createArrServer(radarrMovies, radarrDeletes);
+  const sonarrServer = createArrServer(sonarrSeries, sonarrDeletes);
   mockServers.push(seerrServer, radarrServer, sonarrServer);
 
   try {
@@ -129,6 +148,11 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
       headers: { ...regularHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys: ['movie:99'], profileId: '1' }),
     })).status, 403);
+    assert.equal((await call('/api/delete-bulk', {
+      method: 'POST',
+      headers: { ...regularHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: ['movie:99'], confirmed: true }),
+    })).status, 403);
     assert.equal((await call('/api/profile-order', {
       method: 'POST',
       headers: { ...regularHeaders, 'Content-Type': 'application/json' },
@@ -166,6 +190,44 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
       body: JSON.stringify({ keys: [], profileId: '2' }),
     });
     assert.equal(invalidBulkAssignment.status, 400);
+    const unconfirmedDelete = await call('/api/delete-bulk', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: ['movie:99'], deleteFromArr: false, deleteFiles: false }),
+    });
+    assert.equal(unconfirmedDelete.status, 400);
+    const invalidFileDelete = await call('/api/delete-bulk', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: ['movie:99'], confirmed: true, deleteFromArr: false, deleteFiles: true }),
+    });
+    assert.equal(invalidFileDelete.status, 400);
+    const deletion = await call('/api/delete-bulk', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: ['movie:99'], confirmed: true, deleteFromArr: false, deleteFiles: false }),
+    });
+    assert.equal(deletion.status, 200);
+    assert.deepEqual(await deletion.json(), { deleted: 1, failed: [] });
+    assert.deepEqual(radarrDeletes, []);
+    const deletedDashboard = await (await call('/api/dashboard', { headers: adminHeaders })).json();
+    assert.equal(deletedDashboard.items.length, 0);
+    assert.equal(deletedDashboard.requests.length, 0);
+    assert.equal(deletedDashboard.deletedItems[0].key, 'movie:99');
+    assert.ok(Number.isFinite(Date.parse(deletedDashboard.deletedItems[0].deletedAt)));
+    assert.ok(JSON.parse(await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8')).deletedMedia['movie:99']);
+    const regularDashboard = await (await call('/api/dashboard', { headers: regularHeaders })).json();
+    assert.equal(Object.hasOwn(regularDashboard, 'deletedItems'), false);
+    assert.equal(regularDashboard.items.length, 0);
+    const restore = await call('/api/restore-media', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'movie:99' }),
+    });
+    assert.equal(restore.status, 200);
+    const restoredDashboard = await (await call('/api/dashboard', { headers: adminHeaders })).json();
+    assert.equal(restoredDashboard.items[0].key, 'movie:99');
+    assert.deepEqual(restoredDashboard.deletedItems, []);
     const profileOrder = await call('/api/profile-order', {
       method: 'POST',
       headers: { ...adminHeaders, 'Content-Type': 'application/json' },
@@ -190,6 +252,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.deepEqual(JSON.parse(savedSettings).profileOrder, ['2', '1']);
     assert.equal(JSON.parse(savedSettings).assignments['movie:99'], '2');
     assert.equal(JSON.parse(savedSettings).assignments['show:123'], '2');
+    assert.deepEqual(JSON.parse(savedSettings).deletedMedia, {});
     assert.deepEqual(JSON.parse(savedSettings).reassignments['movie:99'], {
       seerrProfileId: '1',
       adminProfileId: '2',
@@ -198,6 +261,71 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
       seerrProfileId: null,
       adminProfileId: '2',
     });
+
+    radarrMovies.push(
+      { id: 6, tmdbId: 100, title: 'External Delete Movie', sizeOnDisk: 8192 },
+      { id: 7, tmdbId: 101, title: 'File Delete Movie', sizeOnDisk: 1024 },
+    );
+    sonarrSeries.push({ id: 8, tvdbId: 200, title: 'External Delete Show', statistics: { sizeOnDisk: 4096 } });
+    const externalDeletion = await call('/api/delete-bulk', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: ['movie:100', 'show:200'], confirmed: true, deleteFromArr: true, deleteFiles: false }),
+    });
+    assert.equal(externalDeletion.status, 200);
+    assert.deepEqual(await externalDeletion.json(), { deleted: 2, failed: [] });
+    assert.deepEqual(radarrDeletes, [{ id: 6, deleteFiles: 'false' }]);
+    assert.deepEqual(sonarrDeletes, [{ id: 8, deleteFiles: 'false' }]);
+    const fileDeletion = await call('/api/delete-bulk', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: ['movie:101'], confirmed: true, deleteFromArr: true, deleteFiles: true }),
+    });
+    assert.equal(fileDeletion.status, 200);
+    assert.deepEqual(await fileDeletion.json(), { deleted: 1, failed: [] });
+    assert.deepEqual(radarrDeletes[1], { id: 7, deleteFiles: 'true' });
+    const externalDashboard = await (await call('/api/dashboard', { headers: adminHeaders })).json();
+    assert.deepEqual(externalDashboard.deletedItems, []);
+    assert.equal(externalDashboard.items.some(({ key }) => ['movie:100', 'show:200', 'movie:101'].includes(key)), false);
+    const externalRestore = await call('/api/restore-media', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'movie:100' }),
+    });
+    assert.equal(externalRestore.status, 404);
+    radarrMovies.push({ id: 9, tmdbId: 102, title: 'Failed Delete Movie', sizeOnDisk: 2048 });
+    const failedExternalDeletion = await call('/api/delete-bulk', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys: ['movie:102'], confirmed: true, deleteFromArr: true, deleteFiles: false }),
+    });
+    assert.equal(failedExternalDeletion.status, 200);
+    assert.deepEqual(await failedExternalDeletion.json(), {
+      deleted: 1,
+      failed: [{ title: 'Failed Delete Movie', message: 'Radarr returned HTTP 500.' }],
+    });
+    const failedDashboard = await (await call('/api/dashboard', { headers: adminHeaders })).json();
+    assert.deepEqual(failedDashboard.deletedItems.map(({ key, externalRemovalStatus }) => [key, externalRemovalStatus]), [
+      ['movie:102', 'failed'],
+    ]);
+    const restoreFailed = await call('/api/restore-media', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'movie:102' }),
+    });
+    assert.equal(restoreFailed.status, 200);
+    assert.equal((await (await call('/api/dashboard', { headers: adminHeaders })).json()).items.some(({ key }) => key === 'movie:102'), true);
+
+    const savedWithLegacyExternalDeletion = JSON.parse(await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8'));
+    savedWithLegacyExternalDeletion.deletedMedia['movie:100'] = {
+      deletedAt: new Date().toISOString(),
+      item: { key: 'movie:100', title: 'Previously removed movie' },
+      externalRemovalStatus: 'removed',
+    };
+    await fs.writeFile(path.join(dataDir, 'settings.json'), JSON.stringify(savedWithLegacyExternalDeletion));
+    await appModule.loadSettings();
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8')).deletedMedia, {});
+    assert.deepEqual((await (await call('/api/dashboard', { headers: adminHeaders })).json()).deletedItems, []);
   } finally {
     if (app?.listening) await new Promise((resolve) => app.close(resolve));
     await Promise.all(mockServers.map((server) => server.listening

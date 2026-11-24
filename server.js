@@ -28,6 +28,7 @@ const DEFAULTS = {
   caps: {},
   assignments: {},
   reassignments: {},
+  deletedMedia: {},
   profileOrder: [],
   pageSize: 25,
 };
@@ -45,6 +46,11 @@ async function loadSettings() {
   await fs.mkdir(DATA_DIR, { recursive: true });
   try {
     const saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
+    const savedDeletedMedia = saved.deletedMedia;
+    const deletedMedia = savedDeletedMedia && typeof savedDeletedMedia === 'object' && !Array.isArray(savedDeletedMedia)
+      ? Object.fromEntries(Object.entries(savedDeletedMedia)
+        .filter(([, record]) => !(record && typeof record === 'object' && record.externalRemovalStatus === 'removed')))
+      : {};
     settings = {
       ...DEFAULTS,
       ...saved,
@@ -52,11 +58,15 @@ async function loadSettings() {
       caps: saved.caps || {},
       assignments: saved.assignments || {},
       reassignments: saved.reassignments || {},
+      deletedMedia,
       profileOrder: Array.isArray(saved.profileOrder)
         ? [...new Set(saved.profileOrder.map(String).filter((id) => id && id !== 'default' && id.length <= 100))].slice(0, 20000)
         : DEFAULTS.profileOrder,
       pageSize: [10, 25, 50, 100].includes(Number(saved.pageSize)) ? Number(saved.pageSize) : DEFAULTS.pageSize,
     };
+    if (savedDeletedMedia && Object.keys(savedDeletedMedia).length !== Object.keys(deletedMedia).length) {
+      await saveSettings(settings);
+    }
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     await saveSettings(settings);
@@ -290,7 +300,12 @@ async function fetchUsers() {
   return all;
 }
 
-async function getDashboard() {
+function arrMediaKey(kind, media) {
+  if (kind === 'movie') return `movie:${media.tmdbId ?? `radarr-${media.id}`}`;
+  return `show:${media.tvdbId ?? `sonarr-${media.id}`}`;
+}
+
+async function getCurrentInventory() {
   const [users, requests, movies, series] = await Promise.all([
     fetchUsers(),
     fetchRequests(),
@@ -309,6 +324,35 @@ async function getDashboard() {
     reassignments: settings.reassignments,
     defaultCategory: settings.defaultCategory,
   });
+  const arrRecords = new Map();
+  movies.forEach((movie) => {
+    if (movie.id != null) arrRecords.set(arrMediaKey('movie', movie), { serviceName: 'radarr', id: movie.id });
+  });
+  series.forEach((show) => {
+    if (show.id != null) arrRecords.set(arrMediaKey('show', show), { serviceName: 'sonarr', id: show.id });
+  });
+  return { inventory, arrRecords };
+}
+
+async function getDashboard(includeDeleted = false) {
+  const { inventory } = await getCurrentInventory();
+  const deletedMedia = settings.deletedMedia || {};
+  const deletedKeys = new Set(Object.keys(deletedMedia));
+  const currentItems = new Map(inventory.items.map((item) => [item.key, item]));
+  const deletedItems = Object.entries(deletedMedia).flatMap(([key, record]) => {
+    const savedRecord = record && typeof record === 'object' ? record : { deletedAt: record };
+    const item = currentItems.get(key) || savedRecord.item;
+    if (!item || typeof item.title !== 'string') return [];
+    return [{
+      ...item,
+      key,
+      deletedAt: savedRecord.deletedAt || '',
+      externalRemovalStatus: savedRecord.externalRemovalStatus || '',
+      deleteFiles: savedRecord.deleteFiles === true,
+    }];
+  });
+  inventory.items = inventory.items.filter((item) => !deletedKeys.has(item.key));
+  inventory.requests = inventory.requests.filter((entry) => !deletedKeys.has(entry.itemKey));
   const profileOrder = new Map(settings.profileOrder.map((id, index) => [id, index]));
   const profiles = inventory.profiles.filter((profile) => profile.id !== 'default');
   profiles.sort((a, b) => {
@@ -320,12 +364,133 @@ async function getDashboard() {
     return aOrder - bOrder;
   });
   const defaultProfile = inventory.profiles.find((profile) => profile.id === 'default');
-  return {
+  const dashboard = {
     ...inventory,
     profiles: defaultProfile ? [...profiles, defaultProfile] : profiles,
     caps: settings.caps,
     pageSize: settings.pageSize,
   };
+  if (includeDeleted) dashboard.deletedItems = deletedItems;
+  return dashboard;
+}
+
+async function saveBulkDeletion(request) {
+  const body = await readJson(request);
+  if (body.confirmed !== true) {
+    throw new Error('Confirm the deletion before continuing.');
+  }
+  if (typeof body.deleteFromArr !== 'boolean' || typeof body.deleteFiles !== 'boolean') {
+    throw new Error('Choose whether to remove the selected media from Radarr/Sonarr and whether to delete its files.');
+  }
+  if (body.deleteFiles && !body.deleteFromArr) {
+    throw new Error('Deleting files requires also removing the selected media from Radarr/Sonarr.');
+  }
+  if (!Array.isArray(body.keys) || body.keys.length === 0 || body.keys.length > 1000) {
+    throw new Error('Confirm the deletion and select at least one media item (up to 1,000).');
+  }
+  const keys = new Set();
+  for (const key of body.keys) {
+    if (typeof key !== 'string' || !key || key.length > 200) {
+      throw new Error('The selected media list contains an invalid key.');
+    }
+    keys.add(key);
+  }
+  const { inventory, arrRecords } = await getCurrentInventory();
+  const availableItems = new Map(inventory.items
+    .filter((item) => !settings.deletedMedia?.[item.key])
+    .map((item) => [item.key, item]));
+  for (const key of keys) {
+    if (!availableItems.has(key)) {
+      throw new HttpError(409, 'Some selected media is no longer in the active library. Refresh and try again.');
+    }
+    if (body.deleteFromArr && !arrRecords.has(key)) {
+      throw new HttpError(409, 'Some selected media no longer has a matching Radarr/Sonarr record. Refresh and try again.');
+    }
+    if (body.deleteFromArr) {
+      const { serviceName } = arrRecords.get(key);
+      if (!settings.services[serviceName].url || !settings.services[serviceName].apiKey) {
+        throw new HttpError(400, `Configure the ${serviceName[0].toUpperCase()}${serviceName.slice(1)} URL and API key in Settings.`);
+      }
+    }
+  }
+
+  const deletedAt = new Date().toISOString();
+  const deletedMedia = { ...(settings.deletedMedia || {}) };
+  keys.forEach((key) => {
+    deletedMedia[key] = {
+      deletedAt,
+      item: availableItems.get(key),
+      externalRemovalStatus: body.deleteFromArr ? 'pending' : '',
+      deleteFiles: body.deleteFromArr && body.deleteFiles,
+    };
+  });
+  const nextSettings = { ...settings, deletedMedia };
+  await saveSettings(nextSettings);
+  settings = nextSettings;
+
+  let failed = [];
+  if (body.deleteFromArr) {
+    const outcomes = await Promise.all([...keys].map(async (key) => {
+      const { serviceName, id } = arrRecords.get(key);
+      try {
+        await deleteArrMedia(serviceName, id, body.deleteFiles);
+        return { key, status: 'removed' };
+      } catch (error) {
+        return { key, status: 'failed', message: error.message };
+      }
+    }));
+    const completedDeletedMedia = { ...deletedMedia };
+    failed = outcomes.filter((outcome) => outcome.status === 'failed').map(({ key, message }) => ({
+      title: availableItems.get(key).title,
+      message,
+    }));
+    outcomes.forEach(({ key, status }) => {
+      if (status === 'removed') {
+        delete completedDeletedMedia[key];
+      } else {
+        completedDeletedMedia[key] = { ...completedDeletedMedia[key], externalRemovalStatus: status };
+      }
+    });
+    const completedSettings = { ...settings, deletedMedia: completedDeletedMedia };
+    await saveSettings(completedSettings);
+    settings = completedSettings;
+  }
+  return { deleted: keys.size, failed };
+}
+
+async function deleteArrMedia(serviceName, id, deleteFiles) {
+  const service = settings.services[serviceName];
+  if (!service.url || !service.apiKey) {
+    throw new Error(`Configure the ${serviceName[0].toUpperCase()}${serviceName.slice(1)} URL and API key in Settings.`);
+  }
+  const resource = serviceName === 'radarr' ? 'movie' : 'series';
+  const url = `${service.url}/api/v3/${resource}/${encodeURIComponent(id)}?deleteFiles=${deleteFiles}`;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'X-Api-Key': service.apiKey, Accept: 'application/json' },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new Error(`Could not connect to ${serviceName}. The service may or may not have processed the deletion.`);
+  }
+  if (!response.ok) {
+    throw new Error(`${serviceName[0].toUpperCase()}${serviceName.slice(1)} returned HTTP ${response.status}.`);
+  }
+}
+
+async function restoreMedia(request) {
+  const body = await readJson(request);
+  const key = String(body.key || '');
+  if (!key || key.length > 200 || !settings.deletedMedia?.[key]) {
+    throw new HttpError(404, 'That media item is not in deleted media.');
+  }
+  const deletedMedia = { ...settings.deletedMedia };
+  delete deletedMedia[key];
+  const nextSettings = { ...settings, deletedMedia };
+  await saveSettings(nextSettings);
+  settings = nextSettings;
 }
 
 async function saveClientSettings(request) {
@@ -461,7 +626,7 @@ function requireSession(session) {
 }
 
 function requireAdmin(session) {
-  if (!session.profile.isAdmin) throw new HttpError(403, 'Only Seerr administrators can change settings or reassign media.');
+  if (!session.profile.isAdmin) throw new HttpError(403, 'Only Seerr administrators can change settings or manage media.');
 }
 
 const server = http.createServer(async (request, response) => {
@@ -501,7 +666,7 @@ const server = http.createServer(async (request, response) => {
       return jsonResponse(response, 200, await saveClientSettings(request));
     }
     if (request.method === 'GET' && url.pathname === '/api/dashboard') {
-      return jsonResponse(response, 200, await getDashboard());
+      return jsonResponse(response, 200, await getDashboard(Boolean(session.profile.isAdmin)));
     }
     if (request.method === 'POST' && url.pathname === '/api/assign') {
       requireAdmin(session);
@@ -512,6 +677,15 @@ const server = http.createServer(async (request, response) => {
       requireAdmin(session);
       const assigned = await saveBulkAssignment(request);
       return jsonResponse(response, 200, { assigned });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/delete-bulk') {
+      requireAdmin(session);
+      return jsonResponse(response, 200, await saveBulkDeletion(request));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/restore-media') {
+      requireAdmin(session);
+      await restoreMedia(request);
+      return jsonResponse(response, 200, { ok: true });
     }
     if (request.method === 'POST' && url.pathname === '/api/profile-order') {
       requireAdmin(session);

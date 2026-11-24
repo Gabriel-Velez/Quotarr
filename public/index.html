@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#111827">
     <title>Quotarr</title>
     <link rel="icon" type="image/png" href="/quotarr.png">
-    <link rel="stylesheet" href="/styles.css?v=20261122-1601">
-    <script src="/app.js?v=20261122-1556" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20261123-delete-media">
+    <script src="/app.js?v=20261123-delete-media" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -84,6 +84,7 @@
           <div class="settings-tabs" role="tablist" aria-label="Settings sections">
             <button class="settings-tab active" data-settings-section="connections" type="button">Connections & caps</button>
             <button class="settings-tab" data-settings-section="reassign" type="button">Reassign media</button>
+            <button class="settings-tab" data-settings-section="delete" type="button">Delete media</button>
           </div>
           <div id="settings-connections">
           <form id="settings-form" class="settings-layout">
@@ -198,6 +199,62 @@
               <button id="clear-selection" class="button button-secondary" type="button" disabled>Clear</button>
             </div>
             <div id="reassign-list" class="media-list reassign-list"></div>
+          </section>
+          <section id="settings-delete" class="panel reassign-settings" hidden>
+            <div class="panel-heading">
+              <div><p class="eyebrow">LIBRARY CLEANUP</p><h2>Hide media from Quotarr</h2></div>
+              <span id="delete-count" class="count-pill">0 titles</span>
+            </div>
+            <p class="form-intro">By default, this only hides media from Quotarr. You can optionally remove titles from Radarr or Sonarr, and separately choose whether to delete their files. Quotarr can restore visibility, but cannot undo removal from those services or recover deleted files.</p>
+            <div class="reassign-filters">
+              <label class="filter-field search-field">Search titles
+                <input id="delete-search" type="search" placeholder="Search by title">
+              </label>
+              <label class="filter-field">Requested by
+                <select id="delete-requester"><option value="all">Everyone</option></select>
+              </label>
+              <label class="filter-field">Media type
+                <select id="delete-type">
+                  <option value="all">Movies & shows</option>
+                  <option value="Movie">Movies</option>
+                  <option value="Show">Shows</option>
+                </select>
+              </label>
+              <label class="filter-field">Sort by
+                <select id="delete-sort">
+                  <option value="date-newest">Date added · newest</option>
+                  <option value="date-oldest">Date added · oldest</option>
+                  <option value="size-biggest">Size · biggest</option>
+                  <option value="size-smallest">Size · smallest</option>
+                </select>
+              </label>
+            </div>
+            <div class="delete-options">
+              <label>
+                <input id="delete-from-arr" type="checkbox">
+                <span>Also remove selected titles from Radarr/Sonarr</span>
+              </label>
+              <label>
+                <input id="delete-files" type="checkbox" disabled>
+                <span>Also delete files from disk <strong>(may be permanent)</strong></span>
+              </label>
+            </div>
+            <p class="delete-options-help">There is no separate delete-enable switch. Radarr/Sonarr must have write and delete permission for the media folder. For a safety net, configure <strong>Settings → Media Management → Recycle Bin</strong> in each service; without a recycle bin, deleted files may be permanent.</p>
+            <div class="bulk-reassign-toolbar delete-toolbar">
+              <label class="bulk-select-all">
+                <input id="delete-select-filtered" type="checkbox">
+                <span>Select all filtered</span>
+              </label>
+              <span id="delete-selected-count" class="bulk-selected-count">0 selected</span>
+              <span></span>
+              <button id="delete-selected-button" class="button button-secondary" type="button" disabled>Delete selected</button>
+              <button id="delete-clear-selection" class="button button-secondary" type="button" disabled>Clear</button>
+            </div>
+            <div id="delete-list" class="media-list reassign-list"></div>
+            <details id="deleted-media-details" class="deleted-media-details">
+              <summary>Deleted media <span id="deleted-media-count" class="count-pill">0 titles</span></summary>
+              <div id="deleted-media-list" class="media-list deleted-media-list"></div>
+            </details>
           </section>
         </section>
       </main>

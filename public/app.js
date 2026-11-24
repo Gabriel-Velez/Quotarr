@@ -13,6 +13,11 @@ const state = {
   selectedMedia: new Set(),
   reassignVisibleItems: [],
   reassignFilters: { query: '', requester: 'all', type: 'all', sort: 'date-newest' },
+  selectedDeleteMedia: new Set(),
+  deleteVisibleItems: [],
+  deleteFilters: { query: '', requester: 'all', type: 'all', sort: 'date-newest' },
+  deleteConfirm: false,
+  deletedItems: [],
 };
 const byId = (id) => document.getElementById(id);
 const SORT_OPTIONS = [
@@ -105,6 +110,9 @@ function showLogin(message = '') {
   state.settings = null;
   state.localProfileOrder = [];
   state.selectedMedia.clear();
+  state.selectedDeleteMedia.clear();
+  state.deletedItems = [];
+  state.deleteConfirm = false;
   state.reassignVisibleItems = [];
   ['seerr', 'radarr', 'sonarr'].forEach((name) => {
     byId(`${name}-url`).value = '';
@@ -120,6 +128,16 @@ function showLogin(message = '') {
   byId('reassign-requester').replaceChildren();
   byId('reassign-list').replaceChildren();
   byId('reassign-count').textContent = '0 titles';
+  byId('delete-search').value = '';
+  byId('delete-requester').replaceChildren();
+  byId('delete-list').replaceChildren();
+  byId('deleted-media-list').replaceChildren();
+  byId('delete-count').textContent = '0 titles';
+  byId('deleted-media-count').textContent = '0 titles';
+  byId('deleted-media-details').open = false;
+  byId('delete-from-arr').checked = false;
+  byId('delete-files').checked = false;
+  byId('delete-files').disabled = true;
   showNotice(byId('settings-notice'), '');
   byId('navigation').hidden = true;
   byId('refresh-group').hidden = true;
@@ -497,6 +515,7 @@ function makeRequestRow(entry) {
 
 function renderDashboard(data) {
   state.dashboard = data;
+  state.deletedItems = data.deletedItems || [];
   state.hoverDetails = new Map();
   data.items.forEach((item) => state.hoverDetails.set(`item:${item.key}`, item));
   byId('empty-state').hidden = true;
@@ -508,6 +527,7 @@ function renderDashboard(data) {
   byId('last-updated').textContent = `Synced ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   if (state.user?.isAdmin) renderCapList(data.profiles, data.caps);
   if (state.user?.isAdmin) renderReassignList();
+  if (state.user?.isAdmin) renderDeleteList();
 }
 
 async function refreshDashboard(showErrors = true) {
@@ -609,7 +629,7 @@ function makeAssignmentRow(item, profiles) {
   checkboxTarget.className = 'media-select-target';
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
-  checkbox.className = 'media-select-checkbox';
+  checkbox.className = 'media-select-checkbox reassign-media-select-checkbox';
   checkbox.checked = state.selectedMedia.has(item.key);
   checkbox.setAttribute('aria-label', `Select ${item.title} for bulk reassignment`);
   checkboxTarget.append(checkbox);
@@ -728,6 +748,146 @@ function renderReassignList() {
   filtered.forEach((item) => list.append(makeAssignmentRow(item, profiles)));
 }
 
+function makeDeleteRow(item, profiles) {
+  const row = document.createElement('article');
+  row.className = 'media-row delete-media-row';
+  const checkboxTarget = document.createElement('label');
+  checkboxTarget.className = 'media-select-target';
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'media-select-checkbox delete-media-select-checkbox';
+  checkbox.checked = state.selectedDeleteMedia.has(item.key);
+  checkbox.setAttribute('aria-label', `Select ${item.title} for deletion from Quotarr`);
+  checkboxTarget.append(checkbox);
+  row.classList.toggle('selected', checkbox.checked);
+  checkbox.addEventListener('change', () => {
+    if (checkbox.checked) state.selectedDeleteMedia.add(item.key);
+    else state.selectedDeleteMedia.delete(item.key);
+    state.deleteConfirm = false;
+    row.classList.toggle('selected', checkbox.checked);
+    updateDeleteSelectionSummary();
+  });
+  const primary = document.createElement('div');
+  primary.className = 'entry-primary';
+  primary.addEventListener('click', () => checkbox.click());
+  primary.append(makeThumb(item.poster));
+  const title = document.createElement('div');
+  title.className = 'entry-title';
+  const name = document.createElement('strong');
+  name.textContent = item.title;
+  const requester = profiles.find((profile) => profile.id === item.requesterProfileId);
+  const meta = document.createElement('span');
+  meta.textContent = `${item.type} · ${requester?.name || 'No Seerr request'} · ${item.dateRequested ? formatDate(item.dateRequested) : 'No request date'} · ${formatBytes(item.size)}`;
+  title.append(name, meta);
+  primary.append(title);
+  row.append(checkboxTarget, primary);
+  return row;
+}
+
+function updateDeleteSelectionSummary() {
+  const visibleItems = state.deleteVisibleItems;
+  const selectedVisible = visibleItems.reduce((count, item) => count + Number(state.selectedDeleteMedia.has(item.key)), 0);
+  const selectAll = byId('delete-select-filtered');
+  selectAll.checked = visibleItems.length > 0 && selectedVisible === visibleItems.length;
+  selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleItems.length;
+  selectAll.disabled = visibleItems.length === 0;
+  byId('delete-selected-count').textContent = `${state.selectedDeleteMedia.size} selected`;
+  byId('delete-selected-button').disabled = state.selectedDeleteMedia.size === 0;
+  byId('delete-clear-selection').disabled = state.selectedDeleteMedia.size === 0;
+  byId('delete-selected-button').textContent = state.deleteConfirm ? 'Are you sure?' : 'Delete selected';
+  byId('delete-selected-button').classList.toggle('button-danger-confirm', state.deleteConfirm);
+}
+
+function renderDeleteList() {
+  const list = byId('delete-list');
+  if (!list || !state.dashboard) return;
+  const { profiles, items } = state.dashboard;
+  const availableKeys = new Set(items.map((item) => item.key));
+  state.selectedDeleteMedia = new Set([...state.selectedDeleteMedia].filter((key) => availableKeys.has(key)));
+  const requesterSelect = byId('delete-requester');
+  const selectedRequester = state.deleteFilters.requester;
+  requesterSelect.replaceChildren();
+  [['all', 'Everyone'], ['none', 'No Seerr request']].forEach(([value, text]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    requesterSelect.append(option);
+  });
+  profiles.filter((profile) => profile.id !== 'default').forEach((profile) => {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = profile.name;
+    requesterSelect.append(option);
+  });
+  requesterSelect.value = [...requesterSelect.options].some((option) => option.value === selectedRequester) ? selectedRequester : 'all';
+  byId('delete-search').value = state.deleteFilters.query;
+  byId('delete-type').value = state.deleteFilters.type;
+  byId('delete-sort').value = state.deleteFilters.sort;
+
+  let filtered = items.filter((item) => {
+    const matchesText = item.title.toLowerCase().includes(state.deleteFilters.query.trim().toLowerCase());
+    const matchesRequester = state.deleteFilters.requester === 'all'
+      || (state.deleteFilters.requester === 'none' ? !item.requesterProfileId : item.requesterProfileId === state.deleteFilters.requester);
+    const matchesType = state.deleteFilters.type === 'all' || item.type === state.deleteFilters.type;
+    return matchesText && matchesRequester && matchesType;
+  });
+  filtered = sortMediaEntries(filtered, state.deleteFilters.sort);
+  state.deleteVisibleItems = filtered;
+  byId('delete-count').textContent = `${filtered.length} of ${items.length} titles`;
+  updateDeleteSelectionSummary();
+  list.replaceChildren();
+  if (!filtered.length) {
+    const empty = document.createElement('p');
+    empty.className = 'list-empty';
+    empty.textContent = 'No media matches these filters.';
+    list.append(empty);
+  } else {
+    filtered.forEach((item) => list.append(makeDeleteRow(item, profiles)));
+  }
+
+  const deletedList = byId('deleted-media-list');
+  const deletedItems = state.deletedItems;
+  byId('deleted-media-count').textContent = `${deletedItems.length} ${deletedItems.length === 1 ? 'title' : 'titles'}`;
+  deletedList.replaceChildren();
+  if (!deletedItems.length) {
+    const empty = document.createElement('p');
+    empty.className = 'list-empty';
+    empty.textContent = 'No deleted media.';
+    deletedList.append(empty);
+  } else {
+    deletedItems.forEach((item) => {
+      const row = document.createElement('article');
+      row.className = 'media-row deleted-media-row';
+      const primary = document.createElement('div');
+      primary.className = 'entry-primary';
+      primary.append(makeThumb(item.poster));
+      const title = document.createElement('div');
+      title.className = 'entry-title';
+      const name = document.createElement('strong');
+      name.textContent = item.title;
+      const meta = document.createElement('span');
+      const serviceName = item.type === 'Movie' ? 'Radarr' : 'Sonarr';
+      const externalStatus = item.externalRemovalStatus === 'removed'
+        ? `Removed from ${serviceName}${item.deleteFiles ? ' · Files deleted' : ' · Files left on disk'}`
+        : item.externalRemovalStatus === 'failed'
+          ? `Removal from ${serviceName} failed or is uncertain`
+          : item.externalRemovalStatus === 'pending'
+            ? `Removal from ${serviceName} may be incomplete`
+            : 'Quotarr only';
+      meta.textContent = `${item.type} · ${externalStatus} · Hidden ${formatDate(item.deletedAt)}`;
+      title.append(name, meta);
+      primary.append(title);
+      const restoreButton = document.createElement('button');
+      restoreButton.className = 'button button-secondary';
+      restoreButton.type = 'button';
+      restoreButton.textContent = 'Restore in Quotarr';
+      restoreButton.addEventListener('click', () => restoreDeletedMedia(item.key, restoreButton));
+      row.append(primary, restoreButton);
+      deletedList.append(row);
+    });
+  }
+}
+
 async function assignItem(key, profileId, select) {
   select.disabled = true;
   try {
@@ -759,6 +919,64 @@ async function assignSelectedItems() {
     showNotice(byId('settings-notice'), error.message);
   } finally {
     updateBulkSelectionSummary();
+  }
+}
+
+async function deleteSelectedItems() {
+  const keys = [...state.selectedDeleteMedia];
+  if (!keys.length) return;
+  if (!state.deleteConfirm) {
+    state.deleteConfirm = true;
+    updateDeleteSelectionSummary();
+    return;
+  }
+  const button = byId('delete-selected-button');
+  button.disabled = true;
+  showNotice(byId('settings-notice'), '');
+  const deleteFromArr = byId('delete-from-arr').checked;
+  const deleteFiles = byId('delete-files').checked;
+  try {
+    const result = await api('/api/delete-bulk', {
+      method: 'POST',
+      body: JSON.stringify({ keys, confirmed: true, deleteFromArr, deleteFiles }),
+    });
+    state.selectedDeleteMedia.clear();
+    state.deleteConfirm = false;
+    await refreshDashboard(false);
+    const message = result.failed.length
+      ? `${result.deleted} media items hidden in Quotarr. Some could not be removed from Radarr/Sonarr: ${result.failed.map((item) => `${item.title}: ${item.message}`).join('; ')}`
+      : `${result.deleted} media items hidden in Quotarr${deleteFromArr ? ` and removed from Radarr/Sonarr${deleteFiles ? ' with files deleted' : ' with files left on disk'}` : ''}.`;
+    showNotice(byId('settings-notice'), message, result.failed.length ? 'error' : 'success');
+  } catch (error) {
+    state.deleteConfirm = false;
+    showNotice(byId('settings-notice'), error.message);
+  } finally {
+    updateDeleteSelectionSummary();
+    byId('delete-from-arr').checked = false;
+    byId('delete-files').checked = false;
+    byId('delete-files').disabled = true;
+  }
+}
+
+async function restoreDeletedMedia(key, button) {
+  const wasRemovedFromArr = state.deletedItems.some((item) => item.key === key
+    && ['removed', 'pending'].includes(item.externalRemovalStatus));
+  button.disabled = true;
+  showNotice(byId('settings-notice'), '');
+  try {
+    await api('/api/restore-media', { method: 'POST', body: JSON.stringify({ key }) });
+    await refreshDashboard(false);
+    showNotice(
+      byId('settings-notice'),
+      wasRemovedFromArr
+        ? 'Visibility restored in Quotarr only. The title was not re-added to Radarr/Sonarr and deleted files cannot be recovered here.'
+        : 'Media restored to Quotarr.',
+      'success',
+    );
+  } catch (error) {
+    showNotice(byId('settings-notice'), error.message);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1004,10 +1222,12 @@ document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click',
 function setSettingsSection(section) {
   byId('settings-connections').hidden = section !== 'connections';
   byId('settings-reassign').hidden = section !== 'reassign';
+  byId('settings-delete').hidden = section !== 'delete';
   document.querySelectorAll('.settings-tab').forEach((tab) => {
     tab.classList.toggle('active', tab.dataset.settingsSection === section);
   });
   if (section === 'reassign') renderReassignList();
+  if (section === 'delete') renderDeleteList();
 }
 
 document.querySelectorAll('.settings-tab').forEach((tab) => tab.addEventListener('click', () => setSettingsSection(tab.dataset.settingsSection)));
@@ -1027,13 +1247,44 @@ byId('reassign-sort').addEventListener('change', () => {
   state.reassignFilters.sort = byId('reassign-sort').value;
   renderReassignList();
 });
+byId('delete-search').addEventListener('input', () => {
+  state.deleteFilters.query = byId('delete-search').value;
+  state.deleteConfirm = false;
+  renderDeleteList();
+});
+byId('delete-requester').addEventListener('change', () => {
+  state.deleteFilters.requester = byId('delete-requester').value;
+  state.deleteConfirm = false;
+  renderDeleteList();
+});
+byId('delete-type').addEventListener('change', () => {
+  state.deleteFilters.type = byId('delete-type').value;
+  state.deleteConfirm = false;
+  renderDeleteList();
+});
+byId('delete-sort').addEventListener('change', () => {
+  state.deleteFilters.sort = byId('delete-sort').value;
+  state.deleteConfirm = false;
+  renderDeleteList();
+});
+byId('delete-from-arr').addEventListener('change', () => {
+  const removeFromArr = byId('delete-from-arr').checked;
+  byId('delete-files').disabled = !removeFromArr;
+  if (!removeFromArr) byId('delete-files').checked = false;
+  state.deleteConfirm = false;
+  updateDeleteSelectionSummary();
+});
+byId('delete-files').addEventListener('change', () => {
+  state.deleteConfirm = false;
+  updateDeleteSelectionSummary();
+});
 byId('select-filtered').addEventListener('change', () => {
   const checked = byId('select-filtered').checked;
   state.reassignVisibleItems.forEach((item) => {
     if (checked) state.selectedMedia.add(item.key);
     else state.selectedMedia.delete(item.key);
   });
-  document.querySelectorAll('.media-select-checkbox').forEach((checkbox) => {
+  document.querySelectorAll('#reassign-list .media-select-checkbox').forEach((checkbox) => {
     checkbox.checked = checked;
     checkbox.closest('.media-row').classList.toggle('selected', checked);
   });
@@ -1042,13 +1293,39 @@ byId('select-filtered').addEventListener('change', () => {
 byId('bulk-profile').addEventListener('change', updateBulkSelectionSummary);
 byId('clear-selection').addEventListener('click', () => {
   state.selectedMedia.clear();
-  document.querySelectorAll('.media-select-checkbox').forEach((checkbox) => {
+  document.querySelectorAll('#reassign-list .media-select-checkbox').forEach((checkbox) => {
     checkbox.checked = false;
     checkbox.closest('.media-row').classList.remove('selected');
   });
   updateBulkSelectionSummary();
 });
 byId('bulk-assign-button').addEventListener('click', assignSelectedItems);
+byId('delete-select-filtered').addEventListener('change', () => {
+  const checked = byId('delete-select-filtered').checked;
+  state.deleteVisibleItems.forEach((item) => {
+    if (checked) state.selectedDeleteMedia.add(item.key);
+    else state.selectedDeleteMedia.delete(item.key);
+  });
+  state.deleteConfirm = false;
+  document.querySelectorAll('#delete-list .delete-media-select-checkbox').forEach((checkbox) => {
+    checkbox.checked = checked;
+    checkbox.closest('.media-row').classList.toggle('selected', checked);
+  });
+  updateDeleteSelectionSummary();
+});
+byId('delete-selected-button').addEventListener('click', deleteSelectedItems);
+byId('delete-clear-selection').addEventListener('click', () => {
+  state.selectedDeleteMedia.clear();
+  state.deleteConfirm = false;
+  byId('delete-from-arr').checked = false;
+  byId('delete-files').checked = false;
+  byId('delete-files').disabled = true;
+  document.querySelectorAll('#delete-list .delete-media-select-checkbox').forEach((checkbox) => {
+    checkbox.checked = false;
+    checkbox.closest('.media-row').classList.remove('selected');
+  });
+  updateDeleteSelectionSummary();
+});
 byId('refresh-button').addEventListener('click', () => refreshDashboard(true));
 byId('settings-form').addEventListener('submit', (event) => {
   event.preventDefault();
