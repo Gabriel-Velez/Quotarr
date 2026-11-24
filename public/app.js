@@ -697,7 +697,7 @@ function makeAssignmentRow(item, profiles) {
   name.textContent = item.title;
   const requester = profiles.find((profile) => profile.id === item.requesterProfileId);
   const meta = document.createElement("span");
-  meta.textContent = `${item.type} · ${requester?.name || "No Seerr request"} · ${item.dateRequested ? formatDate(item.dateRequested) : "No request date"} · ${formatBytes(item.size)}`;
+  meta.textContent = `${formatBytes(item.size)} · ${item.type} · ${requester?.name || "No Seerr request"} · ${item.dateRequested ? formatDate(item.dateRequested) : "No request date"} `;
   title.append(name, meta);
   primary.append(title);
 
@@ -840,7 +840,7 @@ function makeDeleteRow(item, profiles) {
   name.textContent = item.title;
   const requester = profiles.find((profile) => profile.id === item.requesterProfileId);
   const meta = document.createElement("span");
-  meta.textContent = `${item.type} · ${requester?.name || "No Seerr request"} · ${item.dateRequested ? formatDate(item.dateRequested) : "No request date"} · ${formatBytes(item.size)}`;
+  meta.textContent = `${formatBytes(item.size)} · ${item.type} · ${requester?.name || "No Seerr request"} · ${item.dateRequested ? formatDate(item.dateRequested) : "No request date"}`;
   title.append(name, meta);
   primary.append(title);
   row.append(checkboxTarget, primary);
