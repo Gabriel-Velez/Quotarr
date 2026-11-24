@@ -1343,6 +1343,9 @@ footer span {
   .media-row select {
     width: 140px;
   }
+  .media-row.media-entry {
+    grid-template-columns: 32px minmax(0, 1fr) max-content;
+  }
   .bulk-reassign-toolbar {
     grid-template-columns: 1fr 1fr;
   }
