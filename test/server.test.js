@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
 const os = require('node:os');
@@ -15,6 +16,55 @@ function respond(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
+function requestJson(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.get(url, { headers }, (response) => {
+      let raw = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { raw += chunk; });
+      response.on('end', () => {
+        try {
+          resolve({ status: response.statusCode, body: JSON.parse(raw) });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.on('error', reject);
+  });
+}
+
+async function localUpdateTree() {
+  const root = path.resolve(__dirname, '..');
+  const files = [
+    'package.json',
+    'package-lock.json',
+    'server.js',
+    'lib.js',
+    'notifications.js',
+  ];
+  const collectFiles = async (directory) => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) await collectFiles(fullPath);
+      else if (entry.isFile()) files.push(path.relative(root, fullPath).split(path.sep).join('/'));
+    }
+  };
+  await collectFiles(path.join(root, 'public'));
+  return Promise.all(files.map(async (file) => {
+    const content = await fs.readFile(path.join(root, ...file.split('/')));
+    const hashContent = file.endsWith('.png')
+      ? content
+      : Buffer.from(content.toString('utf8').replace(/\r\n/g, '\n'));
+    const sha = crypto.createHash('sha1')
+      .update(`blob ${hashContent.length}\0`)
+      .update(hashContent)
+      .digest('hex');
+    return { path: file, type: 'blob', sha };
+  }));
+}
+
 test('Jellyfin sessions grant overview access and enforce Seerr admin permissions', async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'storage-tally-test-'));
   const mockServers = [];
@@ -22,6 +72,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
   const previousEnvironment = {
     dataDir: process.env.STORAGE_TALLY_DATA_DIR,
     allowedHosts: process.env.ALLOWED_HOSTS,
+    deployment: process.env.QUOTARR_DEPLOYMENT,
   };
   const seerrSessions = new Map();
   const radarrMovies = [
@@ -125,6 +176,8 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     const baseUrl = await listen(app);
     const call = (route, options = {}) => fetch(`${baseUrl}${route}`, options);
     assert.match(await (await call('/')).text(), /Notification services/);
+    assert.match(await (await call('/')).text(), /data-settings-section="updates"/);
+    assert.match(await (await call('/')).text(), /id="settings-updates"/);
     assert.match(await (await call('/service-worker.js')).text(), /showNotification/);
     const login = async (username) => {
       const response = await call('/api/login', {
@@ -147,6 +200,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     const regularHeaders = { Cookie: regular.cookie };
     assert.equal((await call('/api/dashboard', { headers: regularHeaders })).status, 200);
     assert.equal((await call('/api/settings', { headers: regularHeaders })).status, 403);
+    assert.equal((await call('/api/update', { headers: regularHeaders })).status, 403);
     assert.equal((await call('/api/notifications/test', {
       method: 'POST',
       headers: { ...regularHeaders, 'Content-Type': 'application/json' },
@@ -182,6 +236,55 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.equal(admin.response.status, 200);
     assert.equal(admin.body.user.isAdmin, true);
     const adminHeaders = { Cookie: admin.cookie };
+    const originalFetch = global.fetch;
+    const githubUrl = 'https://api.github.com/repos/Gabriel-Velez/Quotarr/commits?per_page=1';
+    const latestSha = 'a'.repeat(40);
+    const localTree = await localUpdateTree();
+    let updateAvailable = false;
+    global.fetch = async (input, options) => {
+      if (String(input) === githubUrl) {
+        return new Response(JSON.stringify([{
+          sha: latestSha,
+          commit: {
+            message: 'Test update\nDetails',
+            committer: { date: '2026-11-26T18:04:21Z' },
+          },
+        }]), { headers: { 'Content-Type': 'application/json' } });
+      }
+      if (String(input) === `https://api.github.com/repos/Gabriel-Velez/Quotarr/git/trees/${latestSha}?recursive=1`) {
+        const tree = updateAvailable
+          ? localTree.map((entry) => entry.path === 'server.js' ? { ...entry, sha: 'f'.repeat(40) } : entry)
+          : localTree;
+        return new Response(JSON.stringify({ truncated: false, tree }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return originalFetch(input, options);
+    };
+    try {
+      const npmCurrent = await requestJson(`${baseUrl}/api/update`, adminHeaders);
+      assert.equal(npmCurrent.status, 200);
+      assert.equal(npmCurrent.body.isUpToDate, true);
+      assert.equal(npmCurrent.body.deploymentType, 'npm');
+
+      updateAvailable = true;
+      const npmUpdate = await requestJson(`${baseUrl}/api/update`, adminHeaders);
+      assert.equal(npmUpdate.status, 200);
+      assert.equal(npmUpdate.body.isUpToDate, false);
+      assert.equal(npmUpdate.body.updateCommand, 'git pull && npm install && npm start');
+      assert.equal(npmUpdate.body.commit.message, 'Test update');
+
+      process.env.QUOTARR_DEPLOYMENT = 'docker';
+      const dockerUpdate = await requestJson(`${baseUrl}/api/update`, adminHeaders);
+      assert.equal(dockerUpdate.status, 200);
+      assert.equal(dockerUpdate.body.isUpToDate, false);
+      assert.equal(dockerUpdate.body.deploymentType, 'docker');
+      assert.equal(dockerUpdate.body.updateCommand, 'git pull && docker compose up -d --build');
+    } finally {
+      global.fetch = originalFetch;
+      if (previousEnvironment.deployment === undefined) delete process.env.QUOTARR_DEPLOYMENT;
+      else process.env.QUOTARR_DEPLOYMENT = previousEnvironment.deployment;
+    }
     const settingsResponse = await call('/api/settings', { headers: adminHeaders });
     assert.equal(settingsResponse.status, 200);
     const safeSettings = await settingsResponse.json();
@@ -524,5 +627,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     else process.env.STORAGE_TALLY_DATA_DIR = previousEnvironment.dataDir;
     if (previousEnvironment.allowedHosts === undefined) delete process.env.ALLOWED_HOSTS;
     else process.env.ALLOWED_HOSTS = previousEnvironment.allowedHosts;
+    if (previousEnvironment.deployment === undefined) delete process.env.QUOTARR_DEPLOYMENT;
+    else process.env.QUOTARR_DEPLOYMENT = previousEnvironment.deployment;
   }
 });

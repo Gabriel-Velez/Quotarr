@@ -2,6 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
+const { version: APP_VERSION } = require('./package.json');
 const { buildInventory, requestKey } = require('./lib');
 const {
   DEFAULT_PROVIDERS,
@@ -25,6 +26,14 @@ const ALLOWED_HOSTS = new Set((process.env.ALLOWED_HOSTS || 'localhost,127.0.0.1
 const SESSION_COOKIE = 'storage_tally_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const ADMIN_PERMISSION = 2;
+const GITHUB_REPOSITORY = 'Gabriel-Velez/Quotarr';
+const UPDATE_TRACKED_FILES = [
+  'package.json',
+  'package-lock.json',
+  'server.js',
+  'lib.js',
+  'notifications.js',
+];
 const sessions = new Map();
 const loginAttempts = new Map();
 const DEFAULTS = {
@@ -1146,6 +1155,113 @@ function requireAdmin(session) {
   if (!session.profile.isAdmin) throw new HttpError(403, 'Only Seerr administrators can change settings or manage media.');
 }
 
+function gitBlobHash(file, content) {
+  const hashContent = file.endsWith('.png')
+    ? content
+    : Buffer.from(content.toString('utf8').replace(/\r\n/g, '\n'));
+  return crypto.createHash('sha1')
+    .update(`blob ${hashContent.length}\0`)
+    .update(hashContent)
+    .digest('hex');
+}
+
+async function getUpdateInfo() {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'Quotarr',
+  };
+  const fetchGitHubJson = async (url) => {
+    let response;
+    try {
+      response = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
+    } catch {
+      throw new HttpError(502, 'Could not reach GitHub to check for updates. Try again later.');
+    }
+    if (!response.ok) {
+      throw new HttpError(502, `GitHub update check failed (HTTP ${response.status}).`);
+    }
+    try {
+      return await response.json();
+    } catch {
+      throw new HttpError(502, 'GitHub returned an invalid update response.');
+    }
+  };
+
+  const commits = await fetchGitHubJson(
+    `https://api.github.com/repos/${GITHUB_REPOSITORY}/commits?per_page=1`,
+  );
+  const latest = Array.isArray(commits) ? commits[0] : null;
+  const sha = typeof latest?.sha === 'string' && /^[a-f0-9]{40}$/i.test(latest.sha)
+    ? latest.sha
+    : null;
+  const message = typeof latest?.commit?.message === 'string'
+    ? latest.commit.message.split(/\r?\n/, 1)[0].trim().slice(0, 200)
+    : '';
+  const date = latest?.commit?.committer?.date || latest?.commit?.author?.date || '';
+  if (!sha || !message || !date || Number.isNaN(Date.parse(date))) {
+    throw new HttpError(502, 'GitHub did not return valid latest commit information.');
+  }
+
+  const remoteTree = await fetchGitHubJson(
+    `https://api.github.com/repos/${GITHUB_REPOSITORY}/git/trees/${sha}?recursive=1`,
+  );
+  if (!Array.isArray(remoteTree.tree) || remoteTree.truncated) {
+    throw new HttpError(502, 'GitHub returned an incomplete source tree for the update check.');
+  }
+
+  const trackedFiles = new Set(UPDATE_TRACKED_FILES);
+  const remoteHashes = new Map(remoteTree.tree
+    .filter((entry) => entry.type === 'blob'
+      && typeof entry.path === 'string'
+      && (trackedFiles.has(entry.path) || entry.path.startsWith('public/')))
+    .map((entry) => [entry.path, entry.sha]));
+  const publicFiles = [];
+  const collectPublicFiles = async (directory) => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) await collectPublicFiles(fullPath);
+      else if (entry.isFile()) {
+        publicFiles.push(path.relative(ROOT, fullPath).split(path.sep).join('/'));
+      }
+    }
+  };
+  await collectPublicFiles(PUBLIC_DIR);
+  const currentPaths = [...UPDATE_TRACKED_FILES, ...publicFiles].sort();
+  const currentHashes = new Map();
+  for (const file of currentPaths) {
+    let content;
+    try {
+      content = await fs.readFile(path.join(ROOT, ...file.split('/')));
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new HttpError(500, `Installed app file "${file}" is missing; reinstall or rebuild Quotarr.`);
+      }
+      throw error;
+    }
+    currentHashes.set(file, gitBlobHash(file, content));
+  }
+  const isUpToDate = currentHashes.size === remoteHashes.size
+    && [...currentHashes].every(([file, hash]) => remoteHashes.get(file) === hash);
+
+  const deploymentType = process.env.QUOTARR_DEPLOYMENT === 'docker' ? 'docker' : 'npm';
+  return {
+    currentVersion: APP_VERSION,
+    isUpToDate,
+    deploymentType,
+    updateCommand: deploymentType === 'docker'
+      ? 'git pull && docker compose up -d --build'
+      : 'git pull && npm install && npm start',
+    commit: {
+      sha,
+      message,
+      date,
+      url: `https://github.com/${GITHUB_REPOSITORY}/commit/${sha}`,
+    },
+  };
+}
+
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
@@ -1174,6 +1290,10 @@ const server = http.createServer(async (request, response) => {
       return jsonResponse(response, 200, { ok: true });
     }
     const session = url.pathname.startsWith('/api/') ? requireSession(await resolveSession(request)) : null;
+    if (request.method === 'GET' && url.pathname === '/api/update') {
+      requireAdmin(session);
+      return jsonResponse(response, 200, await getUpdateInfo());
+    }
     if (request.method === 'GET' && url.pathname === '/api/settings') {
       requireAdmin(session);
       return jsonResponse(response, 200, safeSettings());

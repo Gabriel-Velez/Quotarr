@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#111827">
     <title>Quotarr</title>
     <link rel="icon" type="image/png" href="/quotarr.png">
-    <link rel="stylesheet" href="/styles.css?v=20261126-notifications">
-    <script src="/app.js?v=20261126-notifications" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20261126-settings-updates">
+    <script src="/app.js?v=20261126-settings-updates" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -86,7 +86,16 @@
             <button class="settings-tab" data-settings-section="notifications" type="button">Notifications</button>
             <button class="settings-tab" data-settings-section="reassign" type="button">Reassign media</button>
             <button class="settings-tab" data-settings-section="delete" type="button">Delete media</button>
+            <button class="settings-tab" data-settings-section="updates" type="button">Updates</button>
           </div>
+          <section id="settings-updates" class="panel settings-updates" hidden>
+            <div class="panel-heading">
+              <div><p class="eyebrow">QUOTARR UPDATES</p><h2>Check for updates</h2></div>
+            </div>
+            <p class="form-intro">Fetch the latest commit information from GitHub and see the update steps for this installation.</p>
+            <button id="check-updates" class="button button-secondary" type="button">Check for updates</button>
+            <div id="update-notice" class="notice" role="status" hidden></div>
+          </section>
           <div id="settings-connections">
           <form id="settings-form" class="settings-layout">
             <div class="settings-main">

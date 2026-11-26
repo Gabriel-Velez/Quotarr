@@ -219,6 +219,38 @@ function updateNotificationProviderTitles() {
   });
 }
 
+function renderUpdateInfo(update) {
+  const notice = byId("update-notice");
+  if (update.isUpToDate) {
+    const summary = document.createElement("p");
+    summary.textContent = `Quotarr ${update.currentVersion} is up to date.`;
+    notice.replaceChildren(summary);
+    notice.className = "notice success update-notice";
+    notice.hidden = false;
+    return;
+  }
+  const summary = document.createElement("p");
+  summary.className = "update-summary";
+  summary.textContent =
+    `Latest GitHub commit (Quotarr ${update.currentVersion}): ${update.commit.message} · ${formatDate(update.commit.date)}`;
+  const link = document.createElement("a");
+  link.href = update.commit.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "View commit on GitHub";
+  const instructions = document.createElement("p");
+  instructions.textContent = `To update this ${update.deploymentType} installation, stop Quotarr and run:`;
+  const command = document.createElement("code");
+  command.className = "update-command";
+  command.textContent = update.updateCommand;
+  const note = document.createElement("p");
+  note.className = "update-note";
+  note.textContent = "This check only reads GitHub information; it does not install or restart Quotarr.";
+  notice.replaceChildren(summary, link, instructions, command, note);
+  notice.className = "notice success update-notice";
+  notice.hidden = false;
+}
+
 async function api(url, options = {}) {
   const response = await fetch(url, {
     ...options,
@@ -335,6 +367,7 @@ function showLogin(message = "") {
   byId("settings-tab").hidden = true;
   setView("login");
   showNotice(byId("login-notice"), message);
+  showNotice(byId("update-notice"), "");
 }
 
 async function enterApp(user) {
@@ -1638,6 +1671,7 @@ function setSettingsSection(section) {
   byId("settings-notifications").hidden = section !== "notifications";
   byId("settings-reassign").hidden = section !== "reassign";
   byId("settings-delete").hidden = section !== "delete";
+  byId("settings-updates").hidden = section !== "updates";
   document.querySelectorAll(".settings-tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.settingsSection === section);
   });
@@ -1746,6 +1780,20 @@ byId("delete-clear-selection").addEventListener("click", () => {
   updateDeleteSelectionSummary();
 });
 byId("refresh-button").addEventListener("click", () => refreshDashboard(true));
+byId("check-updates").addEventListener("click", async () => {
+  const button = byId("check-updates");
+  button.disabled = true;
+  button.textContent = "Checking GitHub...";
+  showNotice(byId("update-notice"), "");
+  try {
+    renderUpdateInfo(await api("/api/update"));
+  } catch (error) {
+    showNotice(byId("update-notice"), error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Check for updates";
+  }
+});
 byId("settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
   saveSettings(false);

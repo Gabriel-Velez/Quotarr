@@ -628,6 +628,26 @@ h1 {
   background: rgba(34, 79, 58, 0.2);
   color: var(--accent);
 }
+.update-notice p {
+  margin-bottom: 8px;
+}
+.update-notice p:last-child {
+  margin-bottom: 0;
+}
+.update-notice a {
+  display: inline-block;
+  margin-bottom: 8px;
+  color: var(--accent);
+}
+.update-command {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.update-note {
+  color: #b6c4d2;
+  font-size: 11px;
+}
 .settings-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

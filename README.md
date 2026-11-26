@@ -28,6 +28,10 @@ The app binds to `127.0.0.1` by default. Set `PORT` to change the port. Use the 
 
 Compose keeps settings and API keys in the persistent `quotarr-data` volume. Use `docker compose down` to stop the app; the volume is preserved. The published port binds to `127.0.0.1` by default. Configure Seerr, Radarr, and Sonarr with addresses reachable from inside the container (for example, `host.docker.internal` for services running on the Docker host). For trusted LAN access, set `QUOTARR_BIND_ADDRESS=0.0.0.0` and `ALLOWED_HOSTS` to the exact hostnames or IP addresses you will use in a `.env` file beside `compose.yaml`. Do not expose the app directly to the internet; use a trusted VPN or HTTPS reverse proxy for remote access.
 
+## Updates
+
+Administrators can use **Settings → Updates → Check for updates** to compare the installed app files with GitHub's latest source. If they match, Quotarr reports that it is up to date; otherwise, it shows the latest commit and update command for the installation type. This is a check only; it does not download files or restart the app. Stop Quotarr before updating. For an npm installation, run `git pull`, `npm install`, and `npm start`. For Docker, run `git pull` and `docker compose up -d --build`; the existing data volume and settings are preserved.
+
 ## Service setup
 
 Use the base address for each service, including a reverse-proxy subpath if applicable (for example `http://media-box:7878/radarr`). Create API keys in each service's settings. The dashboard reads Seerr users and requests, Radarr movies, and Sonarr series; it does not modify those services.
