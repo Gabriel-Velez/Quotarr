@@ -1840,8 +1840,6 @@ byId("notification-service-menu").addEventListener("pointerdown", (event) => {
   state.notificationPointerPress = {
     pointerId: event.pointerId,
     providerId,
-    x: event.clientX,
-    y: event.clientY,
   };
 });
 byId("notification-service-menu").addEventListener("pointerup", (event) => {
@@ -1849,8 +1847,8 @@ byId("notification-service-menu").addEventListener("pointerup", (event) => {
   state.notificationPointerPress = null;
   if (event.pointerType !== "touch" || !press || event.pointerId !== press.pointerId
     || byId("notification-service-menu").hidden) return;
-  if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) return;
-  const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
+  const providerId = document.elementFromPoint(event.clientX, event.clientY)
+    ?.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
   if (providerId !== press.providerId) return;
   event.preventDefault();
   selectNotificationProvider(providerId);
@@ -1863,7 +1861,7 @@ byId("notification-service-menu").addEventListener("touchstart", (event) => {
   const providerId = document.elementFromPoint(touch.clientX, touch.clientY)
     ?.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
   state.notificationTouchPress = providerId
-    ? { identifier: touch.identifier, providerId, x: touch.clientX, y: touch.clientY }
+    ? { identifier: touch.identifier, providerId }
     : null;
 }, { passive: true });
 byId("notification-service-menu").addEventListener("touchend", (event) => {
@@ -1878,7 +1876,7 @@ byId("notification-service-menu").addEventListener("touchend", (event) => {
       break;
     }
   }
-  if (!touch || Math.hypot(touch.clientX - press.x, touch.clientY - press.y) > 10) return;
+  if (!touch) return;
   const providerId = document.elementFromPoint(touch.clientX, touch.clientY)
     ?.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
   if (providerId !== press.providerId) return;
