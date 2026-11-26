@@ -32,6 +32,10 @@ Compose keeps settings and API keys in the persistent `quotarr-data` volume. Use
 
 Administrators can use **Settings → Updates → Check for updates** to compare the installed app files with GitHub's latest source. If they match, Quotarr reports that it is up to date; otherwise, it shows the latest commit and update command for the installation type. This is a check only; it does not download files or restart the app. Stop Quotarr before updating. For an npm installation, run `git pull`, `npm install`, and `npm start`. For Docker, run `git pull` and `docker compose up -d --build`; the existing data volume and settings are preserved.
 
+## Versioning
+
+Each push to `main` automatically increments the patch version in `package.json` and `package-lock.json`, creates a matching `v` tag, and pushes a version commit. Existing `main` commits are tagged without rewriting history: development commits use sequential `v0.0.x` tags, and the current `1.0.0` commit is tagged `v1.0.0`. The workflow requires GitHub Actions to have permission to write repository contents.
+
 ## Service setup
 
 Use the base address for each service, including a reverse-proxy subpath if applicable (for example `http://media-box:7878/radarr`). Create API keys in each service's settings. The dashboard reads Seerr users and requests, Radarr movies, and Sonarr series; it does not modify those services.
