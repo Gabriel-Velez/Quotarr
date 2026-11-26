@@ -229,10 +229,17 @@ function renderUpdateInfo(update) {
     notice.hidden = false;
     return;
   }
+  const versions = document.createElement("p");
+  versions.className = "update-version-row";
+  const currentVersion = document.createElement("span");
+  currentVersion.textContent = `Current version: ${update.currentVersion}`;
+  const latestVersion = document.createElement("span");
+  latestVersion.textContent = `Latest version: ${update.latestVersion}`;
+  versions.append(currentVersion, latestVersion);
   const summary = document.createElement("p");
   summary.className = "update-summary";
   summary.textContent =
-    `Latest GitHub commit (Quotarr ${update.currentVersion}): ${update.commit.message} · ${formatDate(update.commit.date)}`;
+    `Latest GitHub commit: ${update.commit.message} · ${formatDate(update.commit.date)}`;
   const link = document.createElement("a");
   link.href = update.commit.url;
   link.target = "_blank";
@@ -246,8 +253,8 @@ function renderUpdateInfo(update) {
   const note = document.createElement("p");
   note.className = "update-note";
   note.textContent = "This check only reads GitHub information; it does not install or restart Quotarr.";
-  notice.replaceChildren(summary, link, instructions, command, note);
-  notice.className = "notice success update-notice";
+  notice.replaceChildren(versions, summary, link, instructions, command, note);
+  notice.className = "notice update-available update-notice";
   notice.hidden = false;
 }
 

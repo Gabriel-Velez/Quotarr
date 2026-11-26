@@ -1216,6 +1216,23 @@ async function getUpdateInfo() {
       && typeof entry.path === 'string'
       && (trackedFiles.has(entry.path) || entry.path.startsWith('public/')))
     .map((entry) => [entry.path, entry.sha]));
+  const packageResponse = await fetchGitHubJson(
+    `https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/package.json?ref=${sha}`,
+  );
+  if (packageResponse.encoding !== 'base64' || typeof packageResponse.content !== 'string') {
+    throw new HttpError(502, 'GitHub did not return valid package version information.');
+  }
+  let latestVersion;
+  try {
+    latestVersion = JSON.parse(Buffer.from(packageResponse.content, 'base64').toString('utf8')).version;
+  } catch {
+    throw new HttpError(502, 'GitHub returned invalid package version information.');
+  }
+  if (typeof latestVersion !== 'string'
+    || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(latestVersion)) {
+    throw new HttpError(502, 'GitHub returned an invalid package version.');
+  }
+
   const publicFiles = [];
   const collectPublicFiles = async (directory) => {
     const entries = await fs.readdir(directory, { withFileTypes: true });
@@ -1248,6 +1265,7 @@ async function getUpdateInfo() {
   const deploymentType = process.env.QUOTARR_DEPLOYMENT === 'docker' ? 'docker' : 'npm';
   return {
     currentVersion: APP_VERSION,
+    latestVersion,
     isUpToDate,
     deploymentType,
     updateCommand: deploymentType === 'docker'

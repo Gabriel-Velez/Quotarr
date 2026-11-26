@@ -54,15 +54,19 @@ async function localUpdateTree() {
   await collectFiles(path.join(root, 'public'));
   return Promise.all(files.map(async (file) => {
     const content = await fs.readFile(path.join(root, ...file.split('/')));
-    const hashContent = file.endsWith('.png')
-      ? content
-      : Buffer.from(content.toString('utf8').replace(/\r\n/g, '\n'));
-    const sha = crypto.createHash('sha1')
-      .update(`blob ${hashContent.length}\0`)
-      .update(hashContent)
-      .digest('hex');
+    const sha = gitBlobSha(file, content);
     return { path: file, type: 'blob', sha };
   }));
+}
+
+function gitBlobSha(file, content) {
+  const hashContent = file.endsWith('.png')
+    ? content
+    : Buffer.from(content.toString('utf8').replace(/\r\n/g, '\n'));
+  return crypto.createHash('sha1')
+    .update(`blob ${hashContent.length}\0`)
+    .update(hashContent)
+    .digest('hex');
 }
 
 test('Jellyfin sessions grant overview access and enforce Seerr admin permissions', async () => {
@@ -240,6 +244,8 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     const githubUrl = 'https://api.github.com/repos/Gabriel-Velez/Quotarr/commits?per_page=1';
     const latestSha = 'a'.repeat(40);
     const localTree = await localUpdateTree();
+    const localPackage = await fs.readFile(path.resolve(__dirname, '..', 'package.json'));
+    const packageJson = JSON.parse(localPackage);
     let updateAvailable = false;
     global.fetch = async (input, options) => {
       if (String(input) === githubUrl) {
@@ -252,12 +258,31 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
         }]), { headers: { 'Content-Type': 'application/json' } });
       }
       if (String(input) === `https://api.github.com/repos/Gabriel-Velez/Quotarr/git/trees/${latestSha}?recursive=1`) {
+        const remotePackage = updateAvailable
+          ? Buffer.from(localPackage.toString().replace(
+            `"version": "${packageJson.version}"`,
+            '"version": "1.0.1"',
+          ))
+          : localPackage;
         const tree = updateAvailable
-          ? localTree.map((entry) => entry.path === 'server.js' ? { ...entry, sha: 'f'.repeat(40) } : entry)
+          ? localTree.map((entry) => {
+            if (entry.path === 'server.js') return { ...entry, sha: 'f'.repeat(40) };
+            if (entry.path === 'package.json') return { ...entry, sha: gitBlobSha(entry.path, remotePackage) };
+            return entry;
+          })
           : localTree;
         return new Response(JSON.stringify({ truncated: false, tree }), {
           headers: { 'Content-Type': 'application/json' },
         });
+      }
+      if (String(input) === `https://api.github.com/repos/Gabriel-Velez/Quotarr/contents/package.json?ref=${latestSha}`) {
+        const remotePackage = updateAvailable
+          ? localPackage.toString().replace(`"version": "${packageJson.version}"`, '"version": "1.0.1"')
+          : localPackage.toString();
+        return new Response(JSON.stringify({
+          encoding: 'base64',
+          content: Buffer.from(remotePackage).toString('base64'),
+        }), { headers: { 'Content-Type': 'application/json' } });
       }
       return originalFetch(input, options);
     };
@@ -266,11 +291,14 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
       assert.equal(npmCurrent.status, 200);
       assert.equal(npmCurrent.body.isUpToDate, true);
       assert.equal(npmCurrent.body.deploymentType, 'npm');
+      assert.equal(npmCurrent.body.currentVersion, packageJson.version);
+      assert.equal(npmCurrent.body.latestVersion, packageJson.version);
 
       updateAvailable = true;
       const npmUpdate = await requestJson(`${baseUrl}/api/update`, adminHeaders);
       assert.equal(npmUpdate.status, 200);
       assert.equal(npmUpdate.body.isUpToDate, false);
+      assert.equal(npmUpdate.body.latestVersion, '1.0.1');
       assert.equal(npmUpdate.body.updateCommand, 'git pull && npm install && npm start');
       assert.equal(npmUpdate.body.commit.message, 'Test update');
 
