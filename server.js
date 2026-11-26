@@ -3,6 +3,15 @@ const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { buildInventory, requestKey } = require('./lib');
+const {
+  DEFAULT_PROVIDERS,
+  generateVAPIDKeys,
+  PROVIDER_IDS,
+  SECRET_FIELDS,
+  isConfigured,
+  sendProviderNotification,
+  setVapidDetails,
+} = require('./notifications');
 
 const ROOT = __dirname;
 const DATA_DIR = process.env.STORAGE_TALLY_DATA_DIR
@@ -32,6 +41,15 @@ const DEFAULTS = {
   deletedMedia: {},
   profileOrder: [],
   pageSize: 25,
+  notifications: {
+    enabled: true,
+    providers: DEFAULT_PROVIDERS,
+    thresholdPercent: 80,
+    notifyFull: true,
+    alertState: {},
+    vapidPublicKey: '',
+    vapidPrivateKey: '',
+  },
 };
 
 let settings = { ...DEFAULTS };
@@ -41,6 +59,41 @@ class HttpError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+function normalizeProviderInstances(id, savedValue) {
+  const isProvider = (value) => value && typeof value === 'object' && !Array.isArray(value);
+  const hasSavedValues = isProvider(savedValue) && Object.entries(savedValue).some(([key, value]) => {
+    if (key === 'enabled' || key === 'instanceId') return false;
+    if (id === 'webPush' && key === 'subscriptions') {
+      return Array.isArray(value) && value.length > 0;
+    }
+    if (id === 'email' && key === 'port' && Number(value) === 587) return false;
+    if (typeof value === 'string') return value.trim().length > 0;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'boolean') return value;
+    return value != null;
+  });
+  const legacyHasSettings = isProvider(savedValue)
+    && (savedValue.enabled === true || hasSavedValues);
+  const savedInstances = Array.isArray(savedValue)
+    ? savedValue
+    : legacyHasSettings ? [savedValue] : [];
+  const instanceIds = new Set();
+  return savedInstances.flatMap((savedInstance) => {
+    if (!isProvider(savedInstance)) return [];
+    let instanceId = typeof savedInstance.instanceId === 'string'
+      && /^[A-Za-z0-9_-]{1,100}$/.test(savedInstance.instanceId)
+      ? savedInstance.instanceId
+      : crypto.randomUUID();
+    if (instanceIds.has(instanceId)) instanceId = crypto.randomUUID();
+    instanceIds.add(instanceId);
+    const instance = { ...savedInstance, instanceId, enabled: savedInstance.enabled === true };
+    if (id === 'webPush') {
+      instance.subscriptions = Array.isArray(instance.subscriptions) ? instance.subscriptions : [];
+    }
+    return [instance];
+  });
 }
 
 async function loadSettings() {
@@ -68,12 +121,68 @@ async function loadSettings() {
         ? [...new Set(saved.profileOrder.map(String).filter((id) => id && id !== 'default' && id.length <= 100))].slice(0, 20000)
         : DEFAULTS.profileOrder,
       pageSize: [10, 25, 50, 100].includes(Number(saved.pageSize)) ? Number(saved.pageSize) : DEFAULTS.pageSize,
+      notifications: {
+        ...DEFAULTS.notifications,
+        ...(saved.notifications || {}),
+        enabled: typeof saved.notifications?.enabled === 'boolean'
+          ? saved.notifications.enabled
+          : DEFAULTS.notifications.enabled,
+        thresholdPercent: Number.isInteger(saved.notifications?.thresholdPercent)
+          && saved.notifications.thresholdPercent >= 1
+          && saved.notifications.thresholdPercent <= 99
+          ? saved.notifications.thresholdPercent
+          : DEFAULTS.notifications.thresholdPercent,
+        notifyFull: typeof saved.notifications?.notifyFull === 'boolean'
+          ? saved.notifications.notifyFull
+          : DEFAULTS.notifications.notifyFull,
+        providers: Object.fromEntries(PROVIDER_IDS.map((id) => [
+          id,
+          normalizeProviderInstances(id, saved.notifications?.providers?.[id]),
+        ])),
+        alertState: saved.notifications?.alertState && typeof saved.notifications.alertState === 'object'
+          && !Array.isArray(saved.notifications.alertState)
+          ? saved.notifications.alertState
+          : {},
+        vapidPublicKey: typeof saved.notifications?.vapidPublicKey === 'string'
+          ? saved.notifications.vapidPublicKey
+          : '',
+        vapidPrivateKey: typeof saved.notifications?.vapidPrivateKey === 'string'
+          ? saved.notifications.vapidPrivateKey
+          : '',
+      },
     };
+    const providersNeedMigration = PROVIDER_IDS.some((id) => {
+      const savedProviders = saved.notifications?.providers?.[id];
+      const currentProviders = settings.notifications.providers[id];
+      return !Array.isArray(savedProviders)
+        || JSON.stringify(savedProviders) !== JSON.stringify(currentProviders);
+    });
+    if (!settings.notifications.vapidPublicKey || !settings.notifications.vapidPrivateKey) {
+      const { publicKey, privateKey } = generateVAPIDKeys();
+      settings = {
+        ...settings,
+        notifications: { ...settings.notifications, vapidPublicKey: publicKey, vapidPrivateKey: privateKey },
+      };
+      await saveSettings(settings);
+    }
     if (savedDeletedMedia && Object.keys(savedDeletedMedia).length !== Object.keys(deletedMedia).length) {
       await saveSettings(settings);
     }
+    if (providersNeedMigration) await saveSettings(settings);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
+    settings = {
+      ...DEFAULTS,
+      services: DEFAULTS.services,
+      notifications: { ...DEFAULTS.notifications, providers: { ...DEFAULT_PROVIDERS } },
+    };
+  }
+  if (!settings.notifications.vapidPublicKey || !settings.notifications.vapidPrivateKey) {
+    const { publicKey, privateKey } = generateVAPIDKeys();
+    settings = {
+      ...settings,
+      notifications: { ...settings.notifications, vapidPublicKey: publicKey, vapidPrivateKey: privateKey },
+    };
     await saveSettings(settings);
   }
 }
@@ -96,6 +205,34 @@ function safeSettings() {
     defaultCategory: settings.defaultCategory,
     caps: settings.caps,
     pageSize: settings.pageSize,
+    notifications: {
+      enabled: settings.notifications.enabled,
+      thresholdPercent: settings.notifications.thresholdPercent,
+      notifyFull: settings.notifications.notifyFull,
+      providers: Object.fromEntries(PROVIDER_IDS.map((id) => [
+        id,
+        settings.notifications.providers[id].map((provider) => {
+          const safeProvider = {
+            instanceId: provider.instanceId,
+            enabled: provider.enabled === true,
+            configured: isConfigured(id, provider),
+          };
+          if (id === 'webPush') safeProvider.subscriptionCount = provider.subscriptions?.length || 0;
+          if (id === 'email') {
+            for (const field of ['host', 'port', 'secure', 'from', 'to']) {
+              if (provider[field] !== undefined) safeProvider[field] = provider[field];
+            }
+          }
+          if (id === 'gotify' || id === 'ntfy') {
+            if (provider.url) safeProvider.url = provider.url;
+            if (id === 'ntfy' && provider.topic) safeProvider.topic = provider.topic;
+          }
+          if (id === 'telegram' && provider.chatId) safeProvider.chatId = provider.chatId;
+          return safeProvider;
+        }),
+      ])),
+      webPushPublicKey: settings.notifications.vapidPublicKey,
+    },
   };
 }
 
@@ -111,6 +248,142 @@ function validateUrl(value, label) {
     throw new Error(`${label} URL must use http:// or https:// and must not contain credentials, a query, or a fragment.`);
   }
   return url.toString().replace(/\/+$/, '');
+}
+
+function validateProviderConfig(id, submitted = {}, saved = {}) {
+  const instanceId = String(submitted.instanceId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(instanceId)) {
+    throw new Error(`The ${id} notification service has an invalid instance ID.`);
+  }
+  const config = { ...saved, instanceId, enabled: submitted.enabled === true };
+  const fields = {
+    email: ['host', 'port', 'secure', 'username', 'password', 'from', 'to'],
+    discord: ['webhookUrl'],
+    gotify: ['url', 'token'],
+    ntfy: ['url', 'topic', 'token'],
+    pushbullet: ['accessToken'],
+    pushover: ['userKey', 'apiToken'],
+    slack: ['webhookUrl'],
+    telegram: ['botToken', 'chatId'],
+    webhook: ['url', 'secret'],
+  }[id] || [];
+
+  for (const field of fields) {
+    if (field === 'secure') {
+      config.secure = submitted.secure === true;
+      continue;
+    }
+    if (field === 'port') {
+      const portValue = String(submitted.port ?? '').trim();
+      if (!portValue) {
+        config.port = 587;
+        continue;
+      }
+      const port = Number(portValue);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('Email SMTP port must be a number between 1 and 65535.');
+      }
+      config.port = port;
+      continue;
+    }
+    const value = String(submitted[field] ?? '').trim();
+    if (!value && SECRET_FIELDS[id]?.includes(field)) continue;
+    if (value.length > 4096) throw new Error(`${id} notification settings contain a value that is too long.`);
+    if (field === 'url' || field === 'webhookUrl') {
+      config[field] = validateUrl(value, `${id} notification`);
+    } else {
+      config[field] = value;
+    }
+  }
+
+  if (config.enabled) {
+    const requiredFields = {
+      email: ['host', 'from', 'to'],
+      discord: ['webhookUrl'],
+      gotify: ['url', 'token'],
+      ntfy: ['url', 'topic'],
+      pushbullet: ['accessToken'],
+      pushover: ['userKey', 'apiToken'],
+      slack: ['webhookUrl'],
+      telegram: ['botToken', 'chatId'],
+      webhook: ['url'],
+    }[id] || [];
+    if (!requiredFields.every((field) => config[field])) {
+      throw new Error(`Complete the required ${id} notification settings before enabling it.`);
+    }
+    if (id === 'email' && config.username && !config.password) {
+      throw new Error('Enter the SMTP password when SMTP authentication is enabled.');
+    }
+  }
+  return config;
+}
+
+function safeEqualString(value, maximumLength) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximumLength;
+}
+
+async function saveWebPushSubscription(request) {
+  if (!settings.notifications.enabled) {
+    throw new HttpError(409, 'Enable notifications in Settings before subscribing a browser.');
+  }
+  const body = await readJson(request);
+  const instanceId = String(body.instanceId || '');
+  const subscription = body.subscription;
+  const endpoint = subscription?.endpoint;
+  const keys = subscription?.keys;
+  let endpointUrl;
+  try {
+    endpointUrl = new URL(endpoint);
+  } catch {
+    throw new Error('The browser returned an invalid Web Push subscription.');
+  }
+  if (!safeEqualString(endpoint, 4096) || endpointUrl.protocol !== 'https:' || endpointUrl.username || endpointUrl.password
+    || !safeEqualString(keys?.p256dh, 1024) || !safeEqualString(keys?.auth, 1024)) {
+    throw new Error('The browser returned an invalid Web Push subscription.');
+  }
+  const providers = [...settings.notifications.providers.webPush];
+  const providerIndex = providers.findIndex((saved) => saved.instanceId === instanceId);
+  if (providerIndex < 0) throw new HttpError(404, 'Add and save this Web Push service before subscribing a browser.');
+  const provider = providers[providerIndex];
+  const subscriptions = (provider.subscriptions || []).filter((saved) => saved.endpoint !== endpoint);
+  if (subscriptions.length >= 25) throw new HttpError(400, 'Quotarr supports up to 25 Web Push subscriptions.');
+  subscriptions.push({ endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } });
+  providers[providerIndex] = { ...provider, enabled: true, subscriptions };
+  const nextProviders = { ...settings.notifications.providers, webPush: providers };
+  settings = { ...settings, notifications: { ...settings.notifications, providers: nextProviders } };
+  await saveSettings(settings);
+  return safeSettings().notifications.providers.webPush.find((entry) => entry.instanceId === instanceId);
+}
+
+async function removeWebPushSubscription(request) {
+  if (!settings.notifications.enabled) {
+    throw new HttpError(409, 'Enable notifications in Settings before changing Web Push subscriptions.');
+  }
+  const body = await readJson(request);
+  const instanceId = String(body.instanceId || '');
+  const endpoint = String(body.endpoint || '');
+  if (!safeEqualString(endpoint, 4096)) throw new Error('A valid Web Push endpoint is required.');
+  const providers = [...settings.notifications.providers.webPush];
+  const providerIndex = providers.findIndex((saved) => saved.instanceId === instanceId);
+  if (providerIndex < 0) throw new HttpError(404, 'That Web Push service was not found.');
+  const provider = providers[providerIndex];
+  const subscriptions = (provider.subscriptions || []).filter((saved) => saved.endpoint !== endpoint);
+  providers[providerIndex] = {
+    ...provider,
+    enabled: provider.enabled && subscriptions.length > 0,
+    subscriptions,
+  };
+  const unsubscribeBrowser = !providers.some((entry) =>
+    entry.subscriptions?.some((saved) => saved.endpoint === endpoint));
+  settings = {
+    ...settings,
+    notifications: {
+      ...settings.notifications,
+      providers: { ...settings.notifications.providers, webPush: providers },
+    },
+  };
+  await saveSettings(settings);
+  return { unsubscribeBrowser };
 }
 
 function jsonResponse(response, status, value) {
@@ -532,9 +805,235 @@ async function saveClientSettings(request) {
     if (Number.isFinite(cap) && cap >= 0) caps[profileId] = cap;
   }
   const pageSize = [10, 25, 50, 100].includes(Number(body.pageSize)) ? Number(body.pageSize) : settings.pageSize;
-  settings = { ...settings, services, defaultCategory, caps, pageSize };
+  let notifications = settings.notifications;
+  if (body.notifications && typeof body.notifications === 'object') {
+    const submittedNotifications = body.notifications;
+    const enabled = typeof submittedNotifications.enabled === 'boolean'
+      ? submittedNotifications.enabled
+      : settings.notifications.enabled;
+    const thresholdPercent = Number(submittedNotifications.thresholdPercent);
+    if (!Number.isInteger(thresholdPercent) || thresholdPercent < 1 || thresholdPercent > 99) {
+      throw new Error('Storage notification threshold must be a whole number between 1 and 99 percent.');
+    }
+    if (typeof submittedNotifications.notifyFull !== 'boolean') {
+      throw new Error('Choose whether to notify when a profile reaches its full storage cap.');
+    }
+    const providers = {};
+    for (const id of PROVIDER_IDS) {
+      const currentInstances = settings.notifications.providers[id];
+      const rawSubmitted = submittedNotifications.providers?.[id];
+      const submittedInstances = Array.isArray(rawSubmitted)
+        ? rawSubmitted
+        : rawSubmitted && typeof rawSubmitted === 'object'
+          ? [{ ...rawSubmitted, instanceId: rawSubmitted.instanceId || currentInstances[0]?.instanceId || crypto.randomUUID() }]
+          : [];
+      if (submittedInstances.length > 25) throw new Error(`Add no more than 25 ${id} notification services.`);
+      const seenInstanceIds = new Set();
+      providers[id] = submittedInstances.map((submittedProvider) => {
+        if (!submittedProvider || typeof submittedProvider !== 'object' || Array.isArray(submittedProvider)) {
+          throw new Error(`The ${id} notification settings are invalid.`);
+        }
+        const instanceId = String(submittedProvider.instanceId || '');
+        if (seenInstanceIds.has(instanceId)) {
+          throw new Error(`The ${id} notification services must have unique instance IDs.`);
+        }
+        seenInstanceIds.add(instanceId);
+        const savedProvider = currentInstances.find((instance) => instance.instanceId === instanceId) || {};
+        const provider = validateProviderConfig(id, submittedProvider, savedProvider);
+        if (id === 'webPush') {
+          provider.subscriptions = savedProvider.subscriptions || [];
+          provider.enabled = provider.enabled && provider.subscriptions.length > 0;
+        }
+        return provider;
+      });
+    }
+    notifications = {
+      ...notifications,
+      enabled,
+      thresholdPercent,
+      notifyFull: submittedNotifications.notifyFull,
+      providers,
+    };
+  }
+  settings = { ...settings, services, defaultCategory, caps, pageSize, notifications };
   await saveSettings(settings);
   return safeSettings();
+}
+
+async function sendTestNotification(request) {
+  if (!settings.notifications.enabled) {
+    throw new HttpError(409, 'Enable notifications in Settings before sending a test.');
+  }
+  const body = await readJson(request);
+  const id = String(body.provider || '');
+  const instanceId = String(body.instanceId || '');
+  if (!PROVIDER_IDS.includes(id)) throw new Error('Choose a supported notification provider.');
+  const provider = settings.notifications.providers[id].find((entry) => entry.instanceId === instanceId);
+  if (!provider) throw new HttpError(404, `That ${id} notification service was not found.`);
+  if (!isConfigured(id, provider)) throw new HttpError(400, `Complete the ${id} notification settings before testing.`);
+  try {
+    if (id === 'webPush') {
+      setVapidDetails(settings.notifications.vapidPublicKey, settings.notifications.vapidPrivateKey);
+    }
+    const result = await sendProviderNotification(id, provider, {
+      title: 'Quotarr notification test',
+      message: 'Notifications are connected and ready to send storage-cap alerts.',
+      event: 'test',
+    });
+    if (result?.expiredEndpoints?.length) {
+      const expired = new Set(result.expiredEndpoints);
+      const subscriptions = provider.subscriptions.filter((subscription) => !expired.has(subscription.endpoint));
+      const providers = [...settings.notifications.providers.webPush];
+      const providerIndex = providers.findIndex((entry) => entry.instanceId === instanceId);
+      providers[providerIndex] = {
+        ...provider,
+        subscriptions,
+        enabled: provider.enabled && subscriptions.length > 0,
+      };
+      settings = {
+        ...settings,
+        notifications: {
+          ...settings.notifications,
+          providers: {
+            ...settings.notifications.providers,
+            webPush: providers,
+          },
+        },
+      };
+      await saveSettings(settings);
+    }
+    if (result?.delivered === false) {
+      throw new Error('No active browser subscription received the Web Push test.');
+    }
+  } catch (error) {
+    throw new HttpError(502, error.message);
+  }
+}
+
+let notificationCheckPromise;
+
+async function checkStorageNotifications() {
+  if (notificationCheckPromise) return notificationCheckPromise;
+  notificationCheckPromise = (async () => {
+    if (!settings.notifications.enabled) return;
+    const hasEnabledProvider = PROVIDER_IDS.some((id) => {
+      return settings.notifications.providers[id].some((provider) =>
+        provider.enabled && isConfigured(id, provider));
+    });
+    if (!hasEnabledProvider) return;
+
+    const { inventory } = await getCurrentInventory();
+    const usageByProfile = new Map();
+    inventory.items
+      .filter((item) => !settings.deletedMedia?.[item.key])
+      .forEach((item) => usageByProfile.set(
+        item.profileId,
+        (usageByProfile.get(item.profileId) || 0) + item.size,
+      ));
+
+    const thresholdPercent = settings.notifications.thresholdPercent;
+    const alertState = { ...(settings.notifications.alertState || {}) };
+    const notifications = [];
+    inventory.profiles.filter((profile) => profile.id !== 'default').forEach((profile) => {
+      const capGb = Number(settings.caps[profile.id]);
+      if (!Number.isFinite(capGb) || capGb <= 0) {
+        delete alertState[profile.id];
+        return;
+      }
+      const usedBytes = usageByProfile.get(profile.id) || 0;
+      const capBytes = capGb * 1024 ** 3;
+      const percent = usedBytes / capBytes * 100;
+      const previousState = Number(alertState[profile.id]) || 0;
+      const nextState = settings.notifications.notifyFull && percent >= 100
+        ? 2
+        : percent >= thresholdPercent ? 1 : 0;
+      if (nextState > previousState) {
+        const full = nextState === 2;
+        const usedGb = usedBytes / 1024 ** 3;
+        notifications.push({
+          profileId: profile.id,
+          previousState,
+          nextState,
+          payload: {
+            title: full
+              ? `${profile.name} reached their storage cap`
+              : `${profile.name} reached ${thresholdPercent}% of their storage cap`,
+            message: `${profile.name} is using ${usedGb.toFixed(2)} GB of their ${capGb} GB cap (${Math.floor(percent)}%).`,
+            event: full ? 'storage_full' : 'storage_threshold',
+            profile: profile.name,
+            profileId: profile.id,
+            usedGb: Number(usedGb.toFixed(2)),
+            capGb,
+            percent: Number(percent.toFixed(2)),
+          },
+        });
+      } else {
+        alertState[profile.id] = nextState;
+      }
+    });
+
+    for (const notification of notifications) {
+      if (await deliverNotification(notification.payload)) {
+        alertState[notification.profileId] = notification.nextState;
+      } else {
+        alertState[notification.profileId] = notification.previousState;
+      }
+    }
+    settings = {
+      ...settings,
+      notifications: { ...settings.notifications, alertState },
+    };
+    await saveSettings(settings);
+  })().finally(() => {
+    notificationCheckPromise = null;
+  });
+  return notificationCheckPromise;
+}
+
+async function deliverNotification(notification) {
+  if (!settings.notifications.enabled) return false;
+  const providers = PROVIDER_IDS.flatMap((id) =>
+    settings.notifications.providers[id]
+      .filter((provider) => provider.enabled && isConfigured(id, provider))
+      .map((provider) => ({ id, provider })));
+  if (providers.some(({ id }) => id === 'webPush')) {
+    setVapidDetails(settings.notifications.vapidPublicKey, settings.notifications.vapidPrivateKey);
+  }
+  const results = await Promise.allSettled(providers.map(({ id, provider }) =>
+    sendProviderNotification(id, provider, notification)));
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') {
+      if (result.value?.expiredEndpoints?.length) {
+        await removeExpiredWebPushSubscriptions(result.value.expiredEndpoints);
+      }
+      if (result.value?.failedCount) {
+        console.error(`Web Push delivery failed for ${result.value.failedCount} browser subscription(s).`);
+      }
+      continue;
+    }
+    console.error(`${providers[index].id} notification delivery failed: ${result.reason?.message || 'Unknown error.'}`);
+  }
+  return results.some((result) =>
+    result.status === 'fulfilled' && result.value?.delivered !== false);
+}
+
+async function removeExpiredWebPushSubscriptions(expiredEndpoints) {
+  const expired = new Set(expiredEndpoints);
+  const providers = settings.notifications.providers.webPush.map((provider) => {
+    const subscriptions = provider.subscriptions.filter((subscription) => !expired.has(subscription.endpoint));
+    return { ...provider, subscriptions, enabled: provider.enabled && subscriptions.length > 0 };
+  });
+  settings = {
+    ...settings,
+    notifications: {
+      ...settings.notifications,
+      providers: {
+        ...settings.notifications.providers,
+        webPush: providers,
+      },
+    },
+  };
+  await saveSettings(settings);
 }
 
 async function saveAssignments(keys, profileId) {
@@ -683,6 +1182,20 @@ const server = http.createServer(async (request, response) => {
       requireAdmin(session);
       return jsonResponse(response, 200, await saveClientSettings(request));
     }
+    if (request.method === 'POST' && url.pathname === '/api/notifications/test') {
+      requireAdmin(session);
+      await sendTestNotification(request);
+      return jsonResponse(response, 200, { ok: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/notifications/subscription') {
+      requireAdmin(session);
+      return jsonResponse(response, 200, { provider: await saveWebPushSubscription(request) });
+    }
+    if (request.method === 'DELETE' && url.pathname === '/api/notifications/subscription') {
+      requireAdmin(session);
+      await removeWebPushSubscription(request);
+      return jsonResponse(response, 200, { ok: true });
+    }
     if (request.method === 'GET' && url.pathname === '/api/dashboard') {
       return jsonResponse(response, 200, await getDashboard(Boolean(session.profile.isAdmin)));
     }
@@ -728,13 +1241,23 @@ setInterval(() => {
 
 if (require.main === module) {
   loadSettings()
-    .then(() => server.listen(PORT, HOST, () => {
-      console.log(`Quotarr listening at http://${HOST}:${PORT}`);
-    }))
+    .then(() => {
+      server.listen(PORT, HOST, () => {
+        console.log(`Quotarr listening at http://${HOST}:${PORT}`);
+      });
+      void checkStorageNotifications().catch((error) => {
+        console.error(`Could not check storage notification thresholds: ${error.message}`);
+      });
+      setInterval(() => {
+        void checkStorageNotifications().catch((error) => {
+          console.error(`Could not check storage notification thresholds: ${error.message}`);
+        });
+      }, 5 * 60 * 1000).unref();
+    })
     .catch((error) => {
       console.error(`Could not load local settings: ${error.message}`);
       process.exitCode = 1;
     });
 }
 
-module.exports = { loadSettings, server };
+module.exports = { checkStorageNotifications, loadSettings, server };

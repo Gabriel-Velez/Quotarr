@@ -20,6 +20,54 @@ const state = {
   deletedItems: [],
 };
 const byId = (id) => document.getElementById(id);
+const NOTIFICATION_PROVIDERS = [
+  {
+    id: "email",
+    name: "Email",
+    fields: [
+      ["host", "SMTP host", "text"],
+      ["port", "SMTP port", "number"],
+      ["secure", "Use SSL/TLS", "checkbox"],
+      ["username", "SMTP username", "text", true],
+      ["password", "SMTP password", "password", true],
+      ["from", "From address", "email"],
+      ["to", "Recipient address", "email"],
+    ],
+  },
+  { id: "webPush", name: "Web Push", fields: [] },
+  { id: "discord", name: "Discord", fields: [["webhookUrl", "Webhook URL", "url", true]] },
+  {
+    id: "gotify",
+    name: "Gotify",
+    fields: [["url", "Server URL", "url"], ["token", "Application token", "password", true]],
+  },
+  {
+    id: "ntfy",
+    name: "ntfy.sh",
+    fields: [
+      ["url", "Server URL", "url"],
+      ["topic", "Topic", "text"],
+      ["token", "Access token (optional)", "password", true],
+    ],
+  },
+  { id: "pushbullet", name: "Pushbullet", fields: [["accessToken", "Access token", "password", true]] },
+  {
+    id: "pushover",
+    name: "Pushover",
+    fields: [["userKey", "User key", "password", true], ["apiToken", "API token", "password", true]],
+  },
+  { id: "slack", name: "Slack", fields: [["webhookUrl", "Incoming webhook URL", "url", true]] },
+  {
+    id: "telegram",
+    name: "Telegram",
+    fields: [["botToken", "Bot token", "password", true], ["chatId", "Chat ID", "text"]],
+  },
+  {
+    id: "webhook",
+    name: "Webhook",
+    fields: [["url", "Webhook URL", "url", true], ["secret", "Bearer token (optional)", "password", true]],
+  },
+];
 const SORT_OPTIONS = [
   ["date-newest", "Date added · newest"],
   ["date-oldest", "Date added · oldest"],
@@ -53,6 +101,122 @@ function showNotice(target, message, kind = "error") {
   target.textContent = message;
   target.className = `notice ${kind}`;
   target.hidden = !message;
+}
+
+function buildNotificationProviders() {
+  const menu = byId("notification-service-menu");
+  NOTIFICATION_PROVIDERS.forEach((provider) => {
+    const option = document.createElement("button");
+    option.className = "notification-service-option";
+    option.type = "button";
+    option.dataset.addNotificationProvider = provider.id;
+    option.textContent = provider.name;
+    menu.append(option);
+  });
+}
+
+buildNotificationProviders();
+
+function addNotificationProvider(providerId, config = {}) {
+  const definition = NOTIFICATION_PROVIDERS.find((provider) => provider.id === providerId);
+  if (!definition) return;
+  const instanceId = config.instanceId || crypto.randomUUID();
+  const card = document.createElement("article");
+  card.className = "notification-card";
+  card.dataset.provider = providerId;
+  card.dataset.instanceId = instanceId;
+
+  const heading = document.createElement("div");
+  heading.className = "notification-card-heading";
+  const name = document.createElement("h3");
+  name.dataset.instanceTitle = "";
+  const headingActions = document.createElement("div");
+  headingActions.className = "notification-card-actions";
+  const enabledLabel = document.createElement("label");
+  enabledLabel.className = "notification-enable";
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  enabled.dataset.providerEnabled = instanceId;
+  enabled.checked = config.enabled === true;
+  const enabledText = document.createElement("span");
+  enabledText.textContent = "Enable";
+  enabledLabel.append(enabled, enabledText);
+  const remove = document.createElement("button");
+  remove.className = "notification-remove";
+  remove.type = "button";
+  remove.dataset.removeNotification = "";
+  remove.setAttribute("aria-label", `Remove ${definition.name} service`);
+  remove.textContent = "Remove";
+  headingActions.append(enabledLabel, remove);
+  heading.append(name, headingActions);
+
+  const status = document.createElement("p");
+  status.className = "service-status notification-provider-status";
+  status.dataset.providerStatus = instanceId;
+  status.textContent = providerId === "webPush" ? "No browser subscriptions" : "Not configured";
+  card.append(heading, status);
+  if (providerId === "webPush") {
+    const help = document.createElement("p");
+    help.className = "notification-help";
+    help.textContent = "Subscribe this browser to receive alerts here.";
+    const subscribe = document.createElement("button");
+    subscribe.className = "button button-secondary";
+    subscribe.type = "button";
+    subscribe.dataset.webPushAction = "subscribe";
+    subscribe.dataset.instanceId = instanceId;
+    subscribe.textContent = "Enable on this browser";
+    const unsubscribe = document.createElement("button");
+    unsubscribe.className = "button button-secondary";
+    unsubscribe.type = "button";
+    unsubscribe.dataset.webPushAction = "unsubscribe";
+    unsubscribe.dataset.instanceId = instanceId;
+    unsubscribe.textContent = "Remove browser from service";
+    card.append(help, subscribe, unsubscribe);
+  }
+
+  const fields = document.createElement("div");
+  fields.className = "notification-fields";
+  definition.fields.forEach(([key, labelText, type, secret]) => {
+    const label = document.createElement("label");
+    label.className = "notification-field";
+    label.textContent = labelText;
+    const input = document.createElement("input");
+    input.type = type;
+    input.dataset.notificationField = key;
+    input.dataset.instanceId = instanceId;
+    input.autocomplete = secret ? "new-password" : "off";
+    if (secret) input.placeholder = "Leave blank to keep saved secret";
+    label.append(input);
+    fields.append(label);
+  });
+  card.append(fields);
+
+  const test = document.createElement("button");
+  test.className = "button button-secondary notification-test";
+  test.type = "button";
+  test.dataset.testProvider = providerId;
+  test.dataset.instanceId = instanceId;
+  test.textContent = "Send test";
+  card.append(test);
+  byId("notification-providers").append(card);
+  updateNotificationProviderTitles();
+  return card;
+}
+
+function updateNotificationProviderTitles() {
+  const cardsByProvider = new Map();
+  byId("notification-providers").querySelectorAll(".notification-card").forEach((card) => {
+    const providerId = card.dataset.provider;
+    if (!cardsByProvider.has(providerId)) cardsByProvider.set(providerId, []);
+    cardsByProvider.get(providerId).push(card);
+  });
+  cardsByProvider.forEach((cards, providerId) => {
+    const name = NOTIFICATION_PROVIDERS.find((provider) => provider.id === providerId).name;
+    cards.forEach((card, index) => {
+      card.querySelector("[data-instance-title]").textContent =
+        cards.length > 1 ? `${name} ${index + 1}` : name;
+    });
+  });
 }
 
 async function api(url, options = {}) {
@@ -134,6 +298,17 @@ function showLogin(message = "") {
     byId(`${name}-status`).textContent = "Not configured";
     byId(`${name}-status`).classList.remove("configured");
   });
+  document.querySelectorAll("[data-notification-field]").forEach((input) => {
+    if (input.type === "checkbox") input.checked = false;
+    else input.value = "";
+  });
+  document.querySelectorAll("[data-provider-enabled]").forEach((input) => {
+    input.checked = false;
+  });
+  byId("notification-threshold").value = "80";
+  byId("notification-full").checked = true;
+  byId("notification-enabled").checked = true;
+  updateNotificationSettingsEnabled();
   byId("default-category").value = "Unrequested";
   byId("page-size").value = "25";
   byId("cap-list").replaceChildren();
@@ -614,6 +789,69 @@ function renderCapList(profiles, caps = {}) {
   });
 }
 
+function loadNotificationSettings() {
+  const notifications = state.settings.notifications;
+  byId("notification-enabled").checked = notifications.enabled !== false;
+  updateNotificationSettingsEnabled();
+  byId("notification-threshold").value = String(notifications.thresholdPercent || 80);
+  byId("notification-full").checked = notifications.notifyFull !== false;
+  const container = byId("notification-providers");
+  container.replaceChildren();
+  NOTIFICATION_PROVIDERS.forEach((definition) => {
+    (notifications.providers[definition.id] || []).forEach((config) => {
+      const card = addNotificationProvider(definition.id, config);
+      card.querySelector(`[data-provider-enabled="${config.instanceId}"]`).checked = config.enabled === true;
+      definition.fields.forEach(([field, , type, secret]) => {
+        const input = card.querySelector(`[data-notification-field="${field}"]`);
+        if (type === "checkbox") {
+          input.checked = config[field] === true;
+        } else if (secret) {
+          input.value = "";
+          input.placeholder = config.configured
+            ? "Saved — leave blank to keep"
+            : "Enter value";
+        } else {
+          input.value = config[field] ?? "";
+        }
+      });
+      const status = card.querySelector(`[data-provider-status="${config.instanceId}"]`);
+      status.textContent = config.configured
+        ? `${config.enabled ? "Enabled" : "Configured, disabled"}${definition.id === "webPush" ? ` · ${config.subscriptionCount} browser${config.subscriptionCount === 1 ? "" : "s"}` : ""}`
+        : definition.id === "webPush"
+          ? "No browser subscriptions"
+          : "Not configured";
+      status.classList.toggle("configured", Boolean(config.configured && config.enabled));
+    });
+  });
+}
+
+function updateNotificationSettingsEnabled() {
+  byId("notification-options").disabled = !byId("notification-enabled").checked;
+}
+
+function notificationSettingsFromForm() {
+  const providers = Object.fromEntries(NOTIFICATION_PROVIDERS.map(({ id }) => [id, []]));
+  byId("notification-providers").querySelectorAll(".notification-card").forEach((card) => {
+    const definition = NOTIFICATION_PROVIDERS.find((provider) => provider.id === card.dataset.provider);
+    const instanceId = card.dataset.instanceId;
+    const provider = {
+      instanceId,
+      enabled: card.querySelector(`[data-provider-enabled="${instanceId}"]`).checked,
+    };
+    definition.fields.forEach(([field, , type]) => {
+      const input = card.querySelector(`[data-notification-field="${field}"]`);
+      provider[field] = type === "checkbox" ? input.checked : input.value.trim();
+    });
+    providers[definition.id].push(provider);
+  });
+  return {
+    enabled: byId("notification-enabled").checked,
+    thresholdPercent: Number(byId("notification-threshold").value),
+    notifyFull: byId("notification-full").checked,
+    providers,
+  };
+}
+
 async function loadSettings() {
   state.settings = await api("/api/settings");
   ["seerr", "radarr", "sonarr"].forEach((name) => {
@@ -627,6 +865,7 @@ async function loadSettings() {
   byId("default-category").value = state.settings.defaultCategory || "Unrequested";
   byId("page-size").value = String(state.settings.pageSize || 25);
   renderCapList(state.dashboard?.profiles || [], state.settings.caps);
+  loadNotificationSettings();
 }
 
 async function saveSettings(sync) {
@@ -650,6 +889,7 @@ async function saveSettings(sync) {
         defaultCategory: byId("default-category").value,
         caps,
         pageSize: Number(byId("page-size").value),
+        notifications: notificationSettingsFromForm(),
       }),
     });
     ["seerr", "radarr", "sonarr"].forEach((name) => {
@@ -658,12 +898,80 @@ async function saveSettings(sync) {
       byId(`${name}-status`).textContent = configured ? "API key saved" : "API key not configured";
       byId(`${name}-status`).classList.toggle("configured", configured);
     });
+    loadNotificationSettings();
     if (sync) {
       renderDashboard(await api("/api/dashboard"));
       showNotice(byId("settings-notice"), "Settings saved and Seerr profiles synced.", "success");
     } else {
       showNotice(byId("settings-notice"), "Settings saved.", "success");
     }
+    return true;
+  } catch (error) {
+    showNotice(byId("settings-notice"), error.message);
+    return false;
+  }
+}
+
+function base64UrlToBytes(value) {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+}
+
+async function subscribeBrowserForPush(instanceId) {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    throw new Error("This browser does not support Web Push notifications.");
+  }
+  const card = [...byId("notification-providers").querySelectorAll(".notification-card")]
+    .find((entry) => entry.dataset.instanceId === instanceId);
+  if (!card) throw new Error("That Web Push service is no longer available.");
+  card.querySelector(`[data-provider-enabled="${instanceId}"]`).checked = true;
+  if (!(await saveSettings(false))) return;
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") throw new Error("Allow notifications in your browser to enable Web Push.");
+  const registration = await navigator.serviceWorker.register("/service-worker.js");
+  let subscription = await registration.pushManager.getSubscription();
+  if (!subscription) {
+    const publicKey = state.settings.notifications.webPushPublicKey;
+    if (!publicKey) throw new Error("The Web Push public key is unavailable. Reload Settings and try again.");
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: base64UrlToBytes(publicKey),
+    });
+  }
+  const result = await api("/api/notifications/subscription", {
+    method: "POST",
+    body: JSON.stringify({ instanceId, subscription: subscription.toJSON() }),
+  });
+  state.settings.notifications.providers.webPush = [
+    ...state.settings.notifications.providers.webPush.filter((provider) => provider.instanceId !== instanceId),
+    result.provider,
+  ];
+  loadNotificationSettings();
+  showNotice(byId("settings-notice"), "Web Push is enabled for this browser.", "success");
+}
+
+async function unsubscribeBrowserFromPush(instanceId) {
+  const registration = await navigator.serviceWorker.getRegistration("/service-worker.js");
+  const subscription = await registration?.pushManager.getSubscription();
+  if (!subscription) throw new Error("This browser does not have a Web Push subscription.");
+  const result = await api("/api/notifications/subscription", {
+    method: "DELETE",
+    body: JSON.stringify({ instanceId, endpoint: subscription.endpoint }),
+  });
+  if (result.unsubscribeBrowser) await subscription.unsubscribe();
+  await loadSettings();
+  showNotice(byId("settings-notice"), "Web Push was removed from this service.", "success");
+}
+
+async function testNotificationProvider(provider, instanceId) {
+  if (!(await saveSettings(false))) return;
+  try {
+    await api("/api/notifications/test", {
+      method: "POST",
+      body: JSON.stringify({ provider, instanceId }),
+    });
+    showNotice(byId("settings-notice"), "Test notification sent.", "success");
   } catch (error) {
     showNotice(byId("settings-notice"), error.message);
   }
@@ -1327,6 +1635,7 @@ document.querySelectorAll(".tab").forEach((tab) =>
 
 function setSettingsSection(section) {
   byId("settings-connections").hidden = section !== "connections";
+  byId("settings-notifications").hidden = section !== "notifications";
   byId("settings-reassign").hidden = section !== "reassign";
   byId("settings-delete").hidden = section !== "delete";
   document.querySelectorAll(".settings-tab").forEach((tab) => {
@@ -1442,6 +1751,40 @@ byId("settings-form").addEventListener("submit", (event) => {
   saveSettings(false);
 });
 byId("sync-settings").addEventListener("click", () => saveSettings(true));
+byId("save-notifications").addEventListener("click", () => saveSettings(false));
+byId("notification-enabled").addEventListener("change", updateNotificationSettingsEnabled);
+byId("add-notification-service").addEventListener("click", () => {
+  const menu = byId("notification-service-menu");
+  menu.hidden = !menu.hidden;
+  byId("add-notification-service").setAttribute("aria-expanded", String(!menu.hidden));
+});
+byId("notification-service-menu").addEventListener("click", (event) => {
+  const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
+  if (!providerId) return;
+  addNotificationProvider(providerId);
+  byId("notification-service-menu").hidden = true;
+  byId("add-notification-service").setAttribute("aria-expanded", "false");
+});
+byId("notification-providers").addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  const card = button?.closest(".notification-card");
+  if (button?.hasAttribute("data-remove-notification")) {
+    card.remove();
+    updateNotificationProviderTitles();
+    await saveSettings(false);
+    return;
+  }
+  const action = button?.dataset.webPushAction;
+  const instanceId = button?.dataset.instanceId;
+  const testProvider = button?.dataset.testProvider;
+  try {
+    if (action === "subscribe") await subscribeBrowserForPush(instanceId);
+    else if (action === "unsubscribe") await unsubscribeBrowserFromPush(instanceId);
+    else if (testProvider) await testNotificationProvider(testProvider, instanceId);
+  } catch (error) {
+    showNotice(byId("settings-notice"), error.message);
+  }
+});
 byId("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = byId("login-button");

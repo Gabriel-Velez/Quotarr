@@ -30,6 +30,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
   const sonarrSeries = [];
   const radarrDeletes = [];
   const sonarrDeletes = [];
+  const notificationDeliveries = [];
   const failedDeleteIds = new Set([9]);
 
   const seerrServer = http.createServer(async (request, response) => {
@@ -88,12 +89,23 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
   });
   const radarrServer = createArrServer(radarrMovies, radarrDeletes);
   const sonarrServer = createArrServer(sonarrSeries, sonarrDeletes);
-  mockServers.push(seerrServer, radarrServer, sonarrServer);
+  const notificationServer = http.createServer(async (request, response) => {
+    let raw = '';
+    for await (const chunk of request) raw += chunk;
+    notificationDeliveries.push({
+      body: JSON.parse(raw),
+      authorization: request.headers.authorization,
+    });
+    response.writeHead(204);
+    response.end();
+  });
+  mockServers.push(seerrServer, radarrServer, sonarrServer, notificationServer);
 
   try {
     const seerrUrl = await listen(seerrServer);
     const radarrUrl = await listen(radarrServer);
     const sonarrUrl = await listen(sonarrServer);
+    const notificationUrl = await listen(notificationServer);
     await fs.writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({
       services: {
         seerr: { url: seerrUrl, apiKey: 'test-seerr-key' },
@@ -112,6 +124,8 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     await appModule.loadSettings();
     const baseUrl = await listen(app);
     const call = (route, options = {}) => fetch(`${baseUrl}${route}`, options);
+    assert.match(await (await call('/')).text(), /Notification services/);
+    assert.match(await (await call('/service-worker.js')).text(), /showNotification/);
     const login = async (username) => {
       const response = await call('/api/login', {
         method: 'POST',
@@ -133,6 +147,11 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     const regularHeaders = { Cookie: regular.cookie };
     assert.equal((await call('/api/dashboard', { headers: regularHeaders })).status, 200);
     assert.equal((await call('/api/settings', { headers: regularHeaders })).status, 403);
+    assert.equal((await call('/api/notifications/test', {
+      method: 'POST',
+      headers: { ...regularHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'webhook' }),
+    })).status, 403);
     assert.equal((await call('/api/settings', {
       method: 'POST',
       headers: { ...regularHeaders, 'Content-Type': 'application/json' },
@@ -168,6 +187,14 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     const safeSettings = await settingsResponse.json();
     assert.equal(JSON.stringify(safeSettings).includes('test-seerr-key'), false);
     assert.equal(safeSettings.pageSize, 25);
+    assert.equal(safeSettings.notifications.thresholdPercent, 80);
+    assert.equal(safeSettings.notifications.enabled, true);
+    assert.equal(safeSettings.notifications.providers.discord.length, 0);
+    assert.deepEqual(
+      Object.values(safeSettings.notifications.providers).map((providers) => providers.length),
+      Array(10).fill(0),
+    );
+    assert.equal(JSON.stringify(safeSettings).includes('vapidPrivateKey'), false);
     const assignment = await call('/api/assign', {
       method: 'POST',
       headers: { ...adminHeaders, 'Content-Type': 'application/json' },
@@ -327,6 +354,166 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     await appModule.loadSettings();
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8')).deletedMedia, {});
     assert.deepEqual((await (await call('/api/dashboard', { headers: adminHeaders })).json()).deletedItems, []);
+
+    const notificationSettings = await call('/api/settings', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        services: {
+          seerr: { url: seerrUrl, apiKey: '' },
+          radarr: { url: radarrUrl, apiKey: '' },
+          sonarr: { url: sonarrUrl, apiKey: '' },
+        },
+        defaultCategory: 'Unrequested',
+        caps: { '2': 0.0000045 },
+        pageSize: 25,
+        notifications: {
+          enabled: true,
+          thresholdPercent: 80,
+          notifyFull: true,
+          providers: {
+            webhook: [{
+              instanceId: 'alert-hook',
+              enabled: true,
+              url: notificationUrl,
+              secret: 'webhook-secret',
+            }, {
+              instanceId: 'alert-hook-secondary',
+              enabled: true,
+              url: notificationUrl,
+              secret: 'second-webhook-secret',
+            }],
+          },
+        },
+      }),
+    });
+    assert.equal(notificationSettings.status, 200);
+    const safeNotificationSettings = await notificationSettings.json();
+    assert.equal(safeNotificationSettings.notifications.providers.webhook.length, 2);
+    assert.equal(safeNotificationSettings.notifications.providers.webhook[0].configured, true);
+    assert.equal(Object.hasOwn(safeNotificationSettings.notifications.providers.webhook[0], 'url'), false);
+    assert.equal(JSON.stringify(safeNotificationSettings).includes(notificationUrl), false);
+    assert.equal(JSON.stringify(safeNotificationSettings).includes('webhook-secret'), false);
+    const testNotice = await call('/api/notifications/test', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'webhook', instanceId: 'alert-hook' }),
+    });
+    assert.equal(testNotice.status, 200);
+    assert.equal(notificationDeliveries[0].body.event, 'test');
+    assert.equal(notificationDeliveries[0].authorization, 'Bearer webhook-secret');
+    await appModule.checkStorageNotifications();
+    assert.equal(notificationDeliveries[1].body.event, 'storage_threshold');
+    assert.equal(notificationDeliveries[1].body.profileId, '2');
+    assert.ok(notificationDeliveries[1].body.percent >= 80 && notificationDeliveries[1].body.percent < 100);
+    assert.equal(notificationDeliveries[2].body.event, 'storage_threshold');
+    assert.equal(notificationDeliveries[2].authorization, 'Bearer second-webhook-secret');
+    await appModule.checkStorageNotifications();
+    assert.equal(notificationDeliveries.length, 3);
+    await call('/api/settings', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        services: {
+          seerr: { url: seerrUrl, apiKey: '' },
+          radarr: { url: radarrUrl, apiKey: '' },
+          sonarr: { url: sonarrUrl, apiKey: '' },
+        },
+        defaultCategory: 'Unrequested',
+        caps: { '2': 0.000003 },
+        pageSize: 25,
+      }),
+    });
+    await appModule.checkStorageNotifications();
+    assert.equal(notificationDeliveries[3].body.event, 'storage_full');
+    assert.equal(notificationDeliveries[4].body.event, 'storage_full');
+    await appModule.checkStorageNotifications();
+    assert.equal(notificationDeliveries.length, 5);
+
+    await call('/api/settings', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        services: {
+          seerr: { url: seerrUrl, apiKey: '' },
+          radarr: { url: radarrUrl, apiKey: '' },
+          sonarr: { url: sonarrUrl, apiKey: '' },
+        },
+        defaultCategory: 'Unrequested',
+        caps: { '2': 0.000003 },
+        pageSize: 25,
+        notifications: {
+          enabled: true,
+          thresholdPercent: 80,
+          notifyFull: true,
+          providers: {
+            webhook: [{
+              instanceId: 'alert-hook',
+              enabled: true,
+              url: notificationUrl,
+              secret: 'webhook-secret',
+            }],
+            webPush: [],
+          },
+        },
+      }),
+    });
+    await appModule.loadSettings();
+    const persistedProviders = await (await call('/api/settings', { headers: adminHeaders })).json();
+    assert.equal(persistedProviders.notifications.providers.webhook.length, 1);
+    assert.equal(persistedProviders.notifications.providers.webPush.length, 0);
+
+    const resetAlertState = JSON.parse(await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8'));
+    resetAlertState.notifications.alertState['2'] = 0;
+    await fs.writeFile(path.join(dataDir, 'settings.json'), JSON.stringify(resetAlertState));
+    await appModule.loadSettings();
+    await call('/api/settings', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        services: {
+          seerr: { url: seerrUrl, apiKey: '' },
+          radarr: { url: radarrUrl, apiKey: '' },
+          sonarr: { url: sonarrUrl, apiKey: '' },
+        },
+        defaultCategory: 'Unrequested',
+        caps: { '2': 0.000003 },
+        pageSize: 25,
+        notifications: {
+          enabled: false,
+          thresholdPercent: 80,
+          notifyFull: true,
+          providers: {
+            webhook: [{ instanceId: 'alert-hook', enabled: true, url: '', secret: '' }],
+          },
+        },
+      }),
+    });
+    await appModule.checkStorageNotifications();
+    assert.equal(notificationDeliveries.length, 5);
+    const disabledTest = await call('/api/notifications/test', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'webhook', instanceId: 'alert-hook' }),
+    });
+    assert.equal(disabledTest.status, 409);
+
+    const legacyNotificationSettings = JSON.parse(await fs.readFile(path.join(dataDir, 'settings.json'), 'utf8'));
+    legacyNotificationSettings.notifications.providers = {
+      discord: { enabled: false, webhookUrl: 'https://discord.test/legacy' },
+      webPush: { enabled: false, subscriptions: [] },
+      webhook: { enabled: true, url: notificationUrl, secret: 'legacy-secret' },
+    };
+    await fs.writeFile(path.join(dataDir, 'settings.json'), JSON.stringify(legacyNotificationSettings));
+    await appModule.loadSettings();
+    const migratedSettings = await (await call('/api/settings', { headers: adminHeaders })).json();
+    assert.equal(migratedSettings.notifications.enabled, false);
+    assert.equal(migratedSettings.notifications.providers.webhook.length, 1);
+    assert.equal(migratedSettings.notifications.providers.webhook[0].configured, true);
+    assert.equal(migratedSettings.notifications.providers.discord.length, 1);
+    assert.equal(migratedSettings.notifications.providers.discord[0].configured, true);
+    assert.equal(migratedSettings.notifications.providers.webPush.length, 0);
+    assert.equal(JSON.stringify(migratedSettings).includes('legacy-secret'), false);
   } finally {
     if (app?.listening) await new Promise((resolve) => app.close(resolve));
     await Promise.all(mockServers.map((server) => server.listening

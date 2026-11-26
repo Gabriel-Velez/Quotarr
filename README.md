@@ -38,6 +38,14 @@ Each profile's sort control orders both its dashboard poster tiles and expanded 
 
 Profile caps are entered in GB. A blank or zero cap means unlimited. Connection settings, caps, and overrides are stored in `data/settings.json`; API keys are not returned to the browser. The `profileNames` map records Seerr profile IDs alongside their usernames so numeric IDs in assignments and caps are easier to identify. Quotarr refreshes this map when it syncs dashboard data. Keep that file private and back it up if you want to preserve settings.
 
+## Notifications
+
+Administrators can configure storage-cap alerts in **Settings → Notifications**. Quotarr checks profile usage every five minutes and can alert at a configurable threshold (80% by default) and when a profile reaches its cap. Alerts are sent once per level and become eligible again after usage drops below that level. Profiles without a storage cap are not monitored.
+
+The global **Enable notifications** switch pauses all notification delivery and disables the provider and rule controls without removing their saved settings.
+
+Supported providers are Email (SMTP), Web Push, Discord, Gotify, ntfy.sh, Pushbullet, Pushover, Slack, Telegram, and generic Webhook. Use **Add a service** to add one or more instances, including multiple configurations of the same provider; save settings and use **Send test** on an instance to check delivery. Removing an instance saves the change immediately. Web Push subscriptions are per browser and service instance, and require a secure origin (HTTPS, or localhost). SMTP and push-provider credentials are stored in the private settings file and are never returned to the browser. The first run generates VAPID keys for Web Push; keep the settings file when backing up the application so existing browser subscriptions continue to work.
+
 By default, the app only accepts the `localhost` and loopback hostnames. For a trusted LAN deployment, set `HOST=0.0.0.0` and `ALLOWED_HOSTS` to the exact host/IP clients will use (comma-separated if needed). Do not expose the app directly to the internet; use a trusted VPN or HTTPS reverse proxy for remote access.
 
 Poster thumbnails use the services' remote poster URLs where available. If a service has no remote poster URL, the item remains a labeled placeholder.

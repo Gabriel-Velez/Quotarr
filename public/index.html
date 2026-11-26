@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#111827">
     <title>Quotarr</title>
     <link rel="icon" type="image/png" href="/quotarr.png">
-    <link rel="stylesheet" href="/styles.css?v=20261123-delete-media">
-    <script src="/app.js?v=20261123-delete-media" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=20261126-notifications">
+    <script src="/app.js?v=20261126-notifications" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -83,6 +83,7 @@
           <div id="settings-notice" class="notice" role="status" hidden></div>
           <div class="settings-tabs" role="tablist" aria-label="Settings sections">
             <button class="settings-tab active" data-settings-section="connections" type="button">Connections & caps</button>
+            <button class="settings-tab" data-settings-section="notifications" type="button">Notifications</button>
             <button class="settings-tab" data-settings-section="reassign" type="button">Reassign media</button>
             <button class="settings-tab" data-settings-section="delete" type="button">Delete media</button>
           </div>
@@ -156,6 +157,52 @@
             </div>
           </form>
           </div>
+          <section id="settings-notifications" class="notification-settings" hidden>
+            <label class="notification-global-toggle">
+              <input id="notification-enabled" type="checkbox" checked>
+              <span class="notification-toggle-track" aria-hidden="true"></span>
+              <span class="notification-global-copy">
+                <strong>Enable notifications</strong>
+                <span>Turn off to pause alerts and lock notification rules and services.</span>
+              </span>
+            </label>
+            <fieldset id="notification-options" class="notification-settings-fields">
+            <section class="panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">STORAGE ALERTS</p><h2>Notification rules</h2></div>
+              </div>
+              <p class="form-intro">Quotarr checks each profile's library usage every five minutes. Alerts are sent when a profile crosses the threshold or reaches its storage cap. A level alerts once until usage falls below it again.</p>
+              <div class="notification-rules">
+                <label class="filter-field">Alert at
+                  <span class="notification-percent">
+                    <input id="notification-threshold" type="number" min="1" max="99" step="1" value="80">
+                    <span>% of cap</span>
+                  </span>
+                </label>
+                <label class="notification-checkbox">
+                  <input id="notification-full" type="checkbox" checked>
+                  <span>Also notify when a profile reaches 100% of its cap</span>
+                </label>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">DELIVERY PROVIDERS</p><h2>Notification services</h2></div>
+              </div>
+              <p class="form-intro">Configure one or more providers. Credentials are stored on this server and are never returned to the browser. Leave a saved secret blank to keep it.</p>
+              <div class="notification-add-controls">
+                <button id="add-notification-service" class="button button-secondary" type="button" aria-expanded="false" aria-controls="notification-service-menu">
+                  <span aria-hidden="true">+</span> Add a service
+                </button>
+                <div id="notification-service-menu" class="notification-service-menu" role="group" aria-label="Choose a notification service" hidden></div>
+              </div>
+              <div id="notification-providers" class="notification-provider-grid"></div>
+            </section>
+            </fieldset>
+            <div class="settings-actions">
+              <button id="save-notifications" class="button button-primary" type="button">Save notifications</button>
+            </div>
+          </section>
           <section id="settings-reassign" class="panel reassign-settings" hidden>
             <div class="panel-heading">
               <div><p class="eyebrow">LIBRARY ASSIGNMENTS</p><h2>Find and reassign media</h2></div>

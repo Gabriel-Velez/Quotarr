@@ -9,5 +9,9 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "nodemailer": "^10.6.1",
+    "web-push": "^4.0.0"
   }
 }
