@@ -677,16 +677,19 @@ h1 {
 }
 .settings-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 7px;
   margin: 0 0 15px;
 }
 .settings-tab {
+  flex: 0 0 auto;
   padding: 8px 12px;
   border: 1px solid #304055;
   border-radius: 7px;
   background: transparent;
   color: #9eacbd;
   font-size: 11px;
+  white-space: nowrap;
 }
 .settings-tab.active {
   border-color: #668e7c;
