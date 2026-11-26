@@ -18,6 +18,8 @@ const state = {
   deleteFilters: { query: "", requester: "all", type: "all", sort: "date-newest" },
   deleteConfirm: false,
   deletedItems: [],
+  notificationTouchPress: null,
+  suppressNotificationMenuClickUntil: 0,
 };
 const byId = (id) => document.getElementById(id);
 const NOTIFICATION_PROVIDERS = [
@@ -217,6 +219,13 @@ function updateNotificationProviderTitles() {
         cards.length > 1 ? `${name} ${index + 1}` : name;
     });
   });
+}
+
+function selectNotificationProvider(providerId) {
+  if (!NOTIFICATION_PROVIDERS.some((provider) => provider.id === providerId)) return;
+  addNotificationProvider(providerId);
+  byId("notification-service-menu").hidden = true;
+  byId("add-notification-service").setAttribute("aria-expanded", "false");
 }
 
 function renderUpdateInfo(update) {
@@ -1816,9 +1825,43 @@ byId("add-notification-service").addEventListener("click", () => {
 byId("notification-service-menu").addEventListener("click", (event) => {
   const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
   if (!providerId) return;
-  addNotificationProvider(providerId);
-  byId("notification-service-menu").hidden = true;
-  byId("add-notification-service").setAttribute("aria-expanded", "false");
+  if (performance.now() < state.suppressNotificationMenuClickUntil) {
+    state.suppressNotificationMenuClickUntil = 0;
+    event.preventDefault();
+    return;
+  }
+  selectNotificationProvider(providerId);
+});
+byId("notification-service-menu").addEventListener("pointerdown", (event) => {
+  if (event.pointerType !== "touch") {
+    state.notificationTouchPress = null;
+    return;
+  }
+  const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
+  if (!providerId) {
+    state.notificationTouchPress = null;
+    return;
+  }
+  state.notificationTouchPress = {
+    pointerId: event.pointerId,
+    providerId,
+    x: event.clientX,
+    y: event.clientY,
+  };
+});
+byId("notification-service-menu").addEventListener("pointerup", (event) => {
+  const press = state.notificationTouchPress;
+  state.notificationTouchPress = null;
+  if (event.pointerType !== "touch" || !press || event.pointerId !== press.pointerId) return;
+  if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) return;
+  const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
+  if (providerId !== press.providerId) return;
+  event.preventDefault();
+  state.suppressNotificationMenuClickUntil = performance.now() + 1000;
+  selectNotificationProvider(providerId);
+});
+byId("notification-service-menu").addEventListener("pointercancel", () => {
+  state.notificationTouchPress = null;
 });
 byId("notification-providers").addEventListener("click", async (event) => {
   const button = event.target.closest("button");
