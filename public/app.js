@@ -19,7 +19,7 @@ const state = {
   deleteConfirm: false,
   deletedItems: [],
   notificationTouchPress: null,
-  suppressNotificationMenuClickUntil: 0,
+  notificationPointerPress: null,
 };
 const byId = (id) => document.getElementById(id);
 const NOTIFICATION_PROVIDERS = [
@@ -1824,25 +1824,20 @@ byId("add-notification-service").addEventListener("click", () => {
 });
 byId("notification-service-menu").addEventListener("click", (event) => {
   const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
-  if (!providerId) return;
-  if (performance.now() < state.suppressNotificationMenuClickUntil) {
-    state.suppressNotificationMenuClickUntil = 0;
-    event.preventDefault();
-    return;
-  }
+  if (!providerId || byId("notification-service-menu").hidden) return;
   selectNotificationProvider(providerId);
 });
 byId("notification-service-menu").addEventListener("pointerdown", (event) => {
   if (event.pointerType !== "touch") {
-    state.notificationTouchPress = null;
+    state.notificationPointerPress = null;
     return;
   }
   const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
   if (!providerId) {
-    state.notificationTouchPress = null;
+    state.notificationPointerPress = null;
     return;
   }
-  state.notificationTouchPress = {
+  state.notificationPointerPress = {
     pointerId: event.pointerId,
     providerId,
     x: event.clientX,
@@ -1850,17 +1845,47 @@ byId("notification-service-menu").addEventListener("pointerdown", (event) => {
   };
 });
 byId("notification-service-menu").addEventListener("pointerup", (event) => {
-  const press = state.notificationTouchPress;
-  state.notificationTouchPress = null;
-  if (event.pointerType !== "touch" || !press || event.pointerId !== press.pointerId) return;
+  const press = state.notificationPointerPress;
+  state.notificationPointerPress = null;
+  if (event.pointerType !== "touch" || !press || event.pointerId !== press.pointerId
+    || byId("notification-service-menu").hidden) return;
   if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) return;
   const providerId = event.target.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
   if (providerId !== press.providerId) return;
   event.preventDefault();
-  state.suppressNotificationMenuClickUntil = performance.now() + 1000;
   selectNotificationProvider(providerId);
 });
 byId("notification-service-menu").addEventListener("pointercancel", () => {
+  state.notificationPointerPress = null;
+});
+byId("notification-service-menu").addEventListener("touchstart", (event) => {
+  const touch = event.changedTouches[0];
+  const providerId = document.elementFromPoint(touch.clientX, touch.clientY)
+    ?.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
+  state.notificationTouchPress = providerId
+    ? { identifier: touch.identifier, providerId, x: touch.clientX, y: touch.clientY }
+    : null;
+}, { passive: true });
+byId("notification-service-menu").addEventListener("touchend", (event) => {
+  const press = state.notificationTouchPress;
+  state.notificationTouchPress = null;
+  if (!press || byId("notification-service-menu").hidden) return;
+  let touch = null;
+  for (let index = 0; index < event.changedTouches.length; index += 1) {
+    const candidate = event.changedTouches[index];
+    if (candidate.identifier === press.identifier) {
+      touch = candidate;
+      break;
+    }
+  }
+  if (!touch || Math.hypot(touch.clientX - press.x, touch.clientY - press.y) > 10) return;
+  const providerId = document.elementFromPoint(touch.clientX, touch.clientY)
+    ?.closest("[data-add-notification-provider]")?.dataset.addNotificationProvider;
+  if (providerId !== press.providerId) return;
+  event.preventDefault();
+  selectNotificationProvider(providerId);
+}, { passive: false });
+byId("notification-service-menu").addEventListener("touchcancel", () => {
   state.notificationTouchPress = null;
 });
 byId("notification-providers").addEventListener("click", async (event) => {
