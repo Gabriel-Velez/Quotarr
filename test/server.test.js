@@ -34,6 +34,13 @@ function requestJson(url, headers = {}) {
   });
 }
 
+async function waitForNotificationCount(deliveries, expectedCount) {
+  const deadline = Date.now() + 2000;
+  while (deliveries.length < expectedCount && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 async function localUpdateTree() {
   const root = path.resolve(__dirname, '..');
   const files = [
@@ -496,7 +503,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
           sonarr: { url: sonarrUrl, apiKey: '' },
         },
         defaultCategory: 'Unrequested',
-        caps: { '2': 0.0000045 },
+        caps: { '2': 0.00001 },
         pageSize: 25,
         notifications: {
           enabled: true,
@@ -534,6 +541,23 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.equal(notificationDeliveries[0].body.event, 'test');
     assert.equal(notificationDeliveries[0].authorization, 'Bearer webhook-secret');
     await appModule.checkStorageNotifications();
+    assert.equal(notificationDeliveries.length, 1);
+    const thresholdCapUpdate = await call('/api/settings', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        services: {
+          seerr: { url: seerrUrl, apiKey: '' },
+          radarr: { url: radarrUrl, apiKey: '' },
+          sonarr: { url: sonarrUrl, apiKey: '' },
+        },
+        defaultCategory: 'Unrequested',
+        caps: { '2': 0.0000045 },
+        pageSize: 25,
+      }),
+    });
+    assert.equal(thresholdCapUpdate.status, 200);
+    await waitForNotificationCount(notificationDeliveries, 3);
     assert.equal(notificationDeliveries[1].body.event, 'storage_threshold');
     assert.equal(notificationDeliveries[1].body.profileId, '2');
     assert.ok(notificationDeliveries[1].body.percent >= 80 && notificationDeliveries[1].body.percent < 100);
@@ -541,7 +565,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     assert.equal(notificationDeliveries[2].authorization, 'Bearer second-webhook-secret');
     await appModule.checkStorageNotifications();
     assert.equal(notificationDeliveries.length, 3);
-    await call('/api/settings', {
+    const fullCapUpdate = await call('/api/settings', {
       method: 'POST',
       headers: { ...adminHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -555,7 +579,8 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
         pageSize: 25,
       }),
     });
-    await appModule.checkStorageNotifications();
+    assert.equal(fullCapUpdate.status, 200);
+    await waitForNotificationCount(notificationDeliveries, 5);
     assert.equal(notificationDeliveries[3].body.event, 'storage_full');
     assert.equal(notificationDeliveries[4].body.event, 'storage_full');
     await appModule.checkStorageNotifications();

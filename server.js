@@ -813,6 +813,9 @@ async function saveClientSettings(request) {
     const cap = Number(value);
     if (Number.isFinite(cap) && cap >= 0) caps[profileId] = cap;
   }
+  const currentCaps = settings.caps || {};
+  const capsChanged = Object.keys(caps).length !== Object.keys(currentCaps).length
+    || Object.entries(caps).some(([profileId, cap]) => Number(currentCaps[profileId]) !== cap);
   const pageSize = [10, 25, 50, 100].includes(Number(body.pageSize)) ? Number(body.pageSize) : settings.pageSize;
   let notifications = settings.notifications;
   if (body.notifications && typeof body.notifications === 'object') {
@@ -866,6 +869,11 @@ async function saveClientSettings(request) {
   }
   settings = { ...settings, services, defaultCategory, caps, pageSize, notifications };
   await saveSettings(settings);
+  if (capsChanged) {
+    void checkStorageNotifications(true).catch((error) => {
+      console.error(`Could not check storage notifications after a cap update: ${error.message}`);
+    });
+  }
   return safeSettings();
 }
 
@@ -921,8 +929,15 @@ async function sendTestNotification(request) {
 
 let notificationCheckPromise;
 
-async function checkStorageNotifications() {
-  if (notificationCheckPromise) return notificationCheckPromise;
+async function checkStorageNotifications(recheckAfterCurrent = false) {
+  if (notificationCheckPromise) {
+    if (!recheckAfterCurrent) return notificationCheckPromise;
+    return notificationCheckPromise
+      .catch((error) => {
+        console.error(`Storage notification check failed before a cap update recheck: ${error.message}`);
+      })
+      .then(() => checkStorageNotifications());
+  }
   notificationCheckPromise = (async () => {
     if (!settings.notifications.enabled) return;
     const hasEnabledProvider = PROVIDER_IDS.some((id) => {
