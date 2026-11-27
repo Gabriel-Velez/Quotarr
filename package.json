@@ -1,6 +1,6 @@
 {
   "name": "quotarr",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
   "description": "A self-hosted dashboard for tracking media storage by Seerr requester",
   "scripts": {
