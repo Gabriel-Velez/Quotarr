@@ -32,10 +32,32 @@ test('HTTP notification providers send their expected payloads', async () => {
     assert.equal(JSON.parse(calls[2].body).topic, 'alerts');
     assert.equal(calls[3].headers.Authorization, 'Bearer pushbullet-token');
     assert.equal(new URLSearchParams(calls[4].body).get('user'), 'pushover-user');
+    const pushoverPayload = new URLSearchParams(calls[4].body);
+    assert.equal(calls[4].url, 'https://api.pushover.net/1/messages.json');
+    assert.equal(calls[4].headers['Content-Type'], 'application/x-www-form-urlencoded');
+    assert.equal(pushoverPayload.get('token'), 'pushover-token');
+    assert.equal(pushoverPayload.get('title'), notification.title);
+    assert.equal(pushoverPayload.get('message'), notification.message);
     assert.deepEqual(JSON.parse(calls[5].body), { text: '*Quotarr alert*\nA profile reached its storage threshold.' });
     assert.equal(JSON.parse(calls[6].body).chat_id, '123');
     assert.equal(calls[7].headers.Authorization, 'Bearer hook-secret');
     assert.equal(JSON.parse(calls[7].body).event, 'storage_threshold');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('Pushover API rejection details are surfaced to the caller', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({
+    status: 0,
+    errors: ['application token is invalid'],
+  }), { status: 200 });
+  try {
+    await assert.rejects(
+      sendProviderNotification('pushover', { apiToken: 'invalid', userKey: 'user' }, notification),
+      /application token is invalid/,
+    );
   } finally {
     global.fetch = originalFetch;
   }

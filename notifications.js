@@ -170,14 +170,26 @@ async function sendProviderNotification(id, config, notification) {
       } catch {
         throw new Error('Pushover notification delivery failed because the server could not be reached.');
       }
-      if (!response.ok) throw new Error(`Pushover notification delivery failed (HTTP ${response.status}).`);
       let result;
       try {
         result = await response.json();
       } catch {
+        if (!response.ok) {
+          throw new Error(`Pushover notification delivery failed (HTTP ${response.status}).`);
+        }
         throw new Error('Pushover returned an invalid response.');
       }
-      if (result.status !== 1) throw new Error('Pushover rejected the notification. Check the user key and API token.');
+      const details = Array.isArray(result.errors)
+        ? result.errors.filter((error) => typeof error === 'string').join(' ')
+        : '';
+      if (!response.ok) {
+        throw new Error(`Pushover notification delivery failed (HTTP ${response.status})${details ? `: ${details}` : '.'}`);
+      }
+      if (result.status !== 1) {
+        throw new Error(details
+          ? `Pushover rejected the notification: ${details}`
+          : 'Pushover rejected the notification. Check the user key and API token.');
+      }
       return response;
     }
     case 'slack':

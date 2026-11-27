@@ -199,7 +199,12 @@ function addNotificationProvider(providerId, config = {}) {
   test.dataset.testProvider = providerId;
   test.dataset.instanceId = instanceId;
   test.textContent = "Send test";
-  card.append(test);
+  const testStatus = document.createElement("p");
+  testStatus.className = "notification-test-status";
+  testStatus.setAttribute("role", "status");
+  testStatus.setAttribute("aria-live", "polite");
+  testStatus.hidden = true;
+  card.append(test, testStatus);
   byId("notification-providers").append(card);
   updateNotificationProviderTitles();
   return card;
@@ -1014,15 +1019,45 @@ async function unsubscribeBrowserFromPush(instanceId) {
 }
 
 async function testNotificationProvider(provider, instanceId) {
-  if (!(await saveSettings(false))) return;
+  const findTestButton = () => [...byId("notification-providers").querySelectorAll("[data-test-provider]")]
+    .find((button) => button.dataset.testProvider === provider && button.dataset.instanceId === instanceId);
+  const setTestStatus = (message, kind = "") => {
+    const button = findTestButton();
+    const status = button?.closest(".notification-card")?.querySelector(".notification-test-status");
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle("success", kind === "success");
+    status.classList.toggle("error", kind === "error");
+    status.hidden = !message;
+  };
+  const setSending = (sending) => {
+    const button = findTestButton();
+    if (!button) return;
+    button.disabled = sending;
+    button.textContent = sending ? "Sending..." : "Send test";
+  };
+
+  setTestStatus("Saving settings...");
+  setSending(true);
+  if (!(await saveSettings(false))) {
+    setTestStatus("Test not sent. Fix the settings error above.", "error");
+    setSending(false);
+    return;
+  }
+  setSending(true);
+  setTestStatus("Sending test...");
   try {
     await api("/api/notifications/test", {
       method: "POST",
       body: JSON.stringify({ provider, instanceId }),
     });
+    setTestStatus("Test sent.", "success");
     showNotice(byId("settings-notice"), "Test notification sent.", "success");
   } catch (error) {
+    setTestStatus(error.message, "error");
     showNotice(byId("settings-notice"), error.message);
+  } finally {
+    setSending(false);
   }
 }
 
