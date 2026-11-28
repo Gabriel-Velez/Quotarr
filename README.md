@@ -48,7 +48,7 @@ Profile caps are entered in GB. A blank or zero cap means unlimited. Connection 
 
 ## Notifications
 
-Administrators can configure storage-cap alerts in **Settings → Notifications**. Quotarr checks profile usage every five minutes and immediately after a storage cap is changed. It can alert at a configurable threshold (80% by default) and when a profile reaches its cap. Alerts are sent once per level and become eligible again after usage drops below that level. Profiles without a storage cap are not monitored.
+Administrators can configure storage-cap alerts in **Settings → Notifications**. Quotarr checks profile usage every five minutes, after storage caps change, and whenever dashboard data refreshes. This includes refreshes after media reassignments, deletions, and restorations, as well as requests newly visible from Seerr. Alerts can be sent at a configurable threshold (80% by default) and when a profile reaches its cap. Alerts are sent once per level and become eligible again after usage drops below that level. Profiles without a storage cap are not monitored.
 
 The global **Enable notifications** switch pauses all notification delivery and disables the provider and rule controls without removing their saved settings.
 

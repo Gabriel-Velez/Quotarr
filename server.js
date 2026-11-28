@@ -62,6 +62,7 @@ const DEFAULTS = {
 };
 
 let settings = { ...DEFAULTS };
+let settingsWriteQueue = Promise.resolve();
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -196,11 +197,24 @@ async function loadSettings() {
   }
 }
 
-async function saveSettings(next) {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const tempFile = `${SETTINGS_FILE}.tmp`;
-  await fs.writeFile(tempFile, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  await fs.rename(tempFile, SETTINGS_FILE);
+function saveSettings(next) {
+  const contents = `${JSON.stringify(next, null, 2)}\n`;
+  const write = settingsWriteQueue.then(async () => {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const tempFile = `${SETTINGS_FILE}.${crypto.randomUUID()}.tmp`;
+    await fs.writeFile(tempFile, contents, { mode: 0o600 });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fs.rename(tempFile, SETTINGS_FILE);
+        break;
+      } catch (error) {
+        if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 4) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+      }
+    }
+  });
+  settingsWriteQueue = write.catch(() => {});
+  return write;
 }
 
 function safeSettings() {
@@ -653,6 +667,7 @@ async function getDashboard(includeDeleted = false) {
   });
   inventory.items = inventory.items.filter((item) => !deletedKeys.has(item.key));
   inventory.requests = inventory.requests.filter((entry) => !deletedKeys.has(entry.itemKey));
+  scheduleStorageNotificationCheck('dashboard refresh', inventory);
   const profileOrder = new Map(settings.profileOrder.map((id, index) => [id, index]));
   const profiles = inventory.profiles.filter((profile) => profile.id !== 'default');
   profiles.sort((a, b) => {
@@ -869,11 +884,7 @@ async function saveClientSettings(request) {
   }
   settings = { ...settings, services, defaultCategory, caps, pageSize, notifications };
   await saveSettings(settings);
-  if (capsChanged) {
-    void checkStorageNotifications(true).catch((error) => {
-      console.error(`Could not check storage notifications after a cap update: ${error.message}`);
-    });
-  }
+  if (capsChanged) scheduleStorageNotificationCheck('a storage cap update');
   return safeSettings();
 }
 
@@ -929,89 +940,104 @@ async function sendTestNotification(request) {
 
 let notificationCheckPromise;
 
-async function checkStorageNotifications(recheckAfterCurrent = false) {
+function trackNotificationCheck(check) {
+  let tracked;
+  tracked = check.finally(() => {
+    if (notificationCheckPromise === tracked) notificationCheckPromise = null;
+  });
+  notificationCheckPromise = tracked;
+  return tracked;
+}
+
+function checkStorageNotifications(recheckAfterCurrent = false, inventorySnapshot) {
   if (notificationCheckPromise) {
     if (!recheckAfterCurrent) return notificationCheckPromise;
-    return notificationCheckPromise
+    const queuedCheck = notificationCheckPromise
       .catch((error) => {
         console.error(`Storage notification check failed before a cap update recheck: ${error.message}`);
       })
-      .then(() => checkStorageNotifications());
+      .then(() => performStorageNotificationCheck(inventorySnapshot));
+    return trackNotificationCheck(queuedCheck);
   }
-  notificationCheckPromise = (async () => {
-    if (!settings.notifications.enabled) return;
-    const hasEnabledProvider = PROVIDER_IDS.some((id) => {
-      return settings.notifications.providers[id].some((provider) =>
-        provider.enabled && isConfigured(id, provider));
-    });
-    if (!hasEnabledProvider) return;
+  return trackNotificationCheck(performStorageNotificationCheck(inventorySnapshot));
+}
 
-    const { inventory } = await getCurrentInventory();
-    const usageByProfile = new Map();
-    inventory.items
-      .filter((item) => !settings.deletedMedia?.[item.key])
-      .forEach((item) => usageByProfile.set(
-        item.profileId,
-        (usageByProfile.get(item.profileId) || 0) + item.size,
-      ));
-
-    const thresholdPercent = settings.notifications.thresholdPercent;
-    const alertState = { ...(settings.notifications.alertState || {}) };
-    const notifications = [];
-    inventory.profiles.filter((profile) => profile.id !== 'default').forEach((profile) => {
-      const capGb = Number(settings.caps[profile.id]);
-      if (!Number.isFinite(capGb) || capGb <= 0) {
-        delete alertState[profile.id];
-        return;
-      }
-      const usedBytes = usageByProfile.get(profile.id) || 0;
-      const capBytes = capGb * 1024 ** 3;
-      const percent = usedBytes / capBytes * 100;
-      const previousState = Number(alertState[profile.id]) || 0;
-      const nextState = settings.notifications.notifyFull && percent >= 100
-        ? 2
-        : percent >= thresholdPercent ? 1 : 0;
-      if (nextState > previousState) {
-        const full = nextState === 2;
-        const usedGb = usedBytes / 1024 ** 3;
-        notifications.push({
-          profileId: profile.id,
-          previousState,
-          nextState,
-          payload: {
-            title: full
-              ? `${profile.name} reached their storage cap`
-              : `${profile.name} reached ${thresholdPercent}% of their storage cap`,
-            message: `${profile.name} is using ${usedGb.toFixed(2)} GB of their ${capGb} GB cap (${Math.floor(percent)}%).`,
-            event: full ? 'storage_full' : 'storage_threshold',
-            profile: profile.name,
-            profileId: profile.id,
-            usedGb: Number(usedGb.toFixed(2)),
-            capGb,
-            percent: Number(percent.toFixed(2)),
-          },
-        });
-      } else {
-        alertState[profile.id] = nextState;
-      }
-    });
-
-    for (const notification of notifications) {
-      if (await deliverNotification(notification.payload)) {
-        alertState[notification.profileId] = notification.nextState;
-      } else {
-        alertState[notification.profileId] = notification.previousState;
-      }
-    }
-    settings = {
-      ...settings,
-      notifications: { ...settings.notifications, alertState },
-    };
-    await saveSettings(settings);
-  })().finally(() => {
-    notificationCheckPromise = null;
+async function performStorageNotificationCheck(inventorySnapshot) {
+  if (!settings.notifications.enabled) return;
+  const hasEnabledProvider = PROVIDER_IDS.some((id) => {
+    return settings.notifications.providers[id].some((provider) =>
+      provider.enabled && isConfigured(id, provider));
   });
-  return notificationCheckPromise;
+  if (!hasEnabledProvider) return;
+
+  const inventory = inventorySnapshot || (await getCurrentInventory()).inventory;
+  const usageByProfile = new Map();
+  inventory.items
+    .filter((item) => !settings.deletedMedia?.[item.key])
+    .forEach((item) => usageByProfile.set(
+      item.profileId,
+      (usageByProfile.get(item.profileId) || 0) + item.size,
+    ));
+
+  const thresholdPercent = settings.notifications.thresholdPercent;
+  const alertState = { ...(settings.notifications.alertState || {}) };
+  const notifications = [];
+  inventory.profiles.filter((profile) => profile.id !== 'default').forEach((profile) => {
+    const capGb = Number(settings.caps[profile.id]);
+    if (!Number.isFinite(capGb) || capGb <= 0) {
+      delete alertState[profile.id];
+      return;
+    }
+    const usedBytes = usageByProfile.get(profile.id) || 0;
+    const capBytes = capGb * 1024 ** 3;
+    const percent = usedBytes / capBytes * 100;
+    const previousState = Number(alertState[profile.id]) || 0;
+    const nextState = settings.notifications.notifyFull && percent >= 100
+      ? 2
+      : percent >= thresholdPercent ? 1 : 0;
+    if (nextState > previousState) {
+      const full = nextState === 2;
+      const usedGb = usedBytes / 1024 ** 3;
+      notifications.push({
+        profileId: profile.id,
+        previousState,
+        nextState,
+        payload: {
+          title: full
+            ? `${profile.name} reached their storage cap`
+            : `${profile.name} reached ${thresholdPercent}% of their storage cap`,
+          message: `${profile.name} is using ${usedGb.toFixed(2)} GB of their ${capGb} GB cap (${Math.floor(percent)}%).`,
+          event: full ? 'storage_full' : 'storage_threshold',
+          profile: profile.name,
+          profileId: profile.id,
+          usedGb: Number(usedGb.toFixed(2)),
+          capGb,
+          percent: Number(percent.toFixed(2)),
+        },
+      });
+    } else {
+      alertState[profile.id] = nextState;
+    }
+  });
+
+  for (const notification of notifications) {
+    if (await deliverNotification(notification.payload)) {
+      alertState[notification.profileId] = notification.nextState;
+    } else {
+      alertState[notification.profileId] = notification.previousState;
+    }
+  }
+  settings = {
+    ...settings,
+    notifications: { ...settings.notifications, alertState },
+  };
+  await saveSettings(settings);
+}
+
+function scheduleStorageNotificationCheck(reason, inventorySnapshot) {
+  void checkStorageNotifications(true, inventorySnapshot).catch((error) => {
+    console.error(`Could not check storage notifications after ${reason}: ${error.message}`);
+  });
 }
 
 async function deliverNotification(notification) {
