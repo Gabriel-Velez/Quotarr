@@ -1134,6 +1134,7 @@ input::placeholder {
   font-size: 10px;
 }
 .polling-interval-field {
+  margin-top: 15px;
   max-width: 260px;
 }
 .filter-field input,
