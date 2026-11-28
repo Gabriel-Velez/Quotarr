@@ -77,11 +77,12 @@ const SORT_OPTIONS = [
   ["size-smallest", "Size · smallest"],
 ];
 
-function formatBytes(bytes) {
+function formatBytes(bytes, decimalPlaces) {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / 1024 ** exponent).toFixed(exponent > 1 ? 1 : 0)} ${units[exponent]}`;
+  const precision = decimalPlaces ?? (exponent > 1 ? 1 : 0);
+  return `${(bytes / 1024 ** exponent).toFixed(precision)} ${units[exponent]}`;
 }
 
 function formatStorageCap(gigabytes) {
@@ -411,7 +412,7 @@ function renderSummary(profiles, items, requests) {
   const shows = items.length - movies;
   const seerrRequests = requests.filter((request) => !request.manuallyAssigned);
   byId("summary").replaceChildren(
-    summaryCard("Total storage", formatBytes(total), `${items.length} titles in the library`, "◩"),
+    summaryCard("Total storage", formatBytes(total, 2), `${items.length} titles in the library`, "◩"),
     summaryCard(
       "Requested",
       String(seerrRequests.length),
