@@ -7,7 +7,7 @@
     <title>Quotarr</title>
     <link rel="icon" type="image/png" href="/quotarr.png">
     <link rel="stylesheet" href="/styles.css?v=20261126-notification-test-feedback">
-    <script src="/app.js?v=20261128-total-storage-precision" defer></script>
+    <script src="/app.js?v=20261128-seerr-polling-setting" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -127,6 +127,11 @@
                     <p id="sonarr-status" class="service-status">Not configured</p>
                   </div>
                 </div>
+                <label class="filter-field polling-interval-field" for="seerr-polling-interval">
+                  Check Seerr for new requests every (minutes)
+                  <input id="seerr-polling-interval" type="number" min="1" max="1440" step="1" required value="1">
+                </label>
+                <p class="form-intro">Choose 1 to 1,440 minutes. Dashboard refreshes also check for new requests.</p>
               </section>
 
               <section class="panel">

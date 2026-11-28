@@ -338,6 +338,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     const safeSettings = await settingsResponse.json();
     assert.equal(JSON.stringify(safeSettings).includes('test-seerr-key'), false);
     assert.equal(safeSettings.pageSize, 25);
+    assert.equal(safeSettings.seerrPollingIntervalMinutes, 1);
     assert.equal(safeSettings.notifications.thresholdPercent, 80);
     assert.equal(safeSettings.notifications.enabled, true);
     assert.equal(safeSettings.notifications.providers.discord.length, 0);
@@ -346,6 +347,20 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
       Array(10).fill(0),
     );
     assert.equal(JSON.stringify(safeSettings).includes('vapidPrivateKey'), false);
+    const invalidPollingInterval = await call('/api/settings', {
+      method: 'POST',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        services: {
+          seerr: { url: seerrUrl, apiKey: '' },
+          radarr: { url: radarrUrl, apiKey: '' },
+          sonarr: { url: sonarrUrl, apiKey: '' },
+        },
+        defaultCategory: 'Unrequested',
+        seerrPollingIntervalMinutes: 0,
+      }),
+    });
+    assert.equal(invalidPollingInterval.status, 400);
     const assignment = await call('/api/assign', {
       method: 'POST',
       headers: { ...adminHeaders, 'Content-Type': 'application/json' },
@@ -518,6 +533,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
         defaultCategory: 'Unrequested',
         caps: { '1': 0.000001, '2': 0.00001 },
         pageSize: 25,
+        seerrPollingIntervalMinutes: 5,
         notifications: {
           enabled: true,
           thresholdPercent: 80,
@@ -540,6 +556,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     });
     assert.equal(notificationSettings.status, 200);
     const safeNotificationSettings = await notificationSettings.json();
+    assert.equal(safeNotificationSettings.seerrPollingIntervalMinutes, 5);
     assert.equal(safeNotificationSettings.notifications.providers.webhook.length, 2);
     assert.equal(safeNotificationSettings.notifications.providers.webhook[0].configured, true);
     assert.equal(Object.hasOwn(safeNotificationSettings.notifications.providers.webhook[0], 'url'), false);
@@ -622,6 +639,8 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
     requestAlertState.notifications.alertState['2'] = 0;
     await fs.writeFile(path.join(dataDir, 'settings.json'), JSON.stringify(requestAlertState));
     await appModule.loadSettings();
+    await appModule.checkForNewSeerrRequests();
+    assert.equal(notificationDeliveries.length, 7);
     seerrRequests.push({
       id: 12,
       type: 'movie',
@@ -629,8 +648,7 @@ test('Jellyfin sessions grant overview access and enforce Seerr admin permission
       media: { tmdbId: 100, title: 'New Request' },
       requestedBy: { id: 2 },
     });
-    const requestDashboard = await call('/api/dashboard', { headers: adminHeaders });
-    assert.equal(requestDashboard.status, 200);
+    await appModule.checkForNewSeerrRequests();
     await waitForNotificationCount(notificationDeliveries, 9);
     assert.equal(notificationDeliveries[7].body.event, 'storage_full');
     assert.equal(notificationDeliveries[8].body.event, 'storage_full');

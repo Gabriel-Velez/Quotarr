@@ -50,6 +50,7 @@ const DEFAULTS = {
   deletedMedia: {},
   profileOrder: [],
   pageSize: 25,
+  seerrPollingIntervalMinutes: 1,
   notifications: {
     enabled: true,
     providers: DEFAULT_PROVIDERS,
@@ -131,6 +132,11 @@ async function loadSettings() {
         ? [...new Set(saved.profileOrder.map(String).filter((id) => id && id !== 'default' && id.length <= 100))].slice(0, 20000)
         : DEFAULTS.profileOrder,
       pageSize: [10, 25, 50, 100].includes(Number(saved.pageSize)) ? Number(saved.pageSize) : DEFAULTS.pageSize,
+      seerrPollingIntervalMinutes: Number.isInteger(saved.seerrPollingIntervalMinutes)
+        && saved.seerrPollingIntervalMinutes >= 1
+        && saved.seerrPollingIntervalMinutes <= 1440
+        ? saved.seerrPollingIntervalMinutes
+        : DEFAULTS.seerrPollingIntervalMinutes,
       notifications: {
         ...DEFAULTS.notifications,
         ...(saved.notifications || {}),
@@ -228,6 +234,7 @@ function safeSettings() {
     defaultCategory: settings.defaultCategory,
     caps: settings.caps,
     pageSize: settings.pageSize,
+    seerrPollingIntervalMinutes: settings.seerrPollingIntervalMinutes,
     notifications: {
       enabled: settings.notifications.enabled,
       thresholdPercent: settings.notifications.thresholdPercent,
@@ -586,6 +593,84 @@ async function fetchRequests() {
   return all;
 }
 
+let monitoredSeerrUrl = '';
+let knownSeerrRequestIds = null;
+let seerrRequestPollPromise;
+let seerrRequestPollingTimer;
+
+function seerrRequestIdentity(request) {
+  if (request?.id != null) return String(request.id);
+  const mediaKey = requestKey(request?.type, request?.media) || 'unknown';
+  return `${mediaKey}:${request?.requestedBy?.id ?? 'unknown'}:${request?.createdAt || ''}`;
+}
+
+async function checkForNewSeerrRequests() {
+  if (seerrRequestPollPromise) return seerrRequestPollPromise;
+  seerrRequestPollPromise = (async () => {
+    const service = settings.services.seerr;
+    if (!service.url || !service.apiKey) {
+      monitoredSeerrUrl = '';
+      knownSeerrRequestIds = null;
+      return;
+    }
+    if (service.url !== monitoredSeerrUrl) {
+      monitoredSeerrUrl = service.url;
+      knownSeerrRequestIds = null;
+    }
+
+    const take = 100;
+    const newRequestIds = [];
+    let foundKnownRequest = false;
+    for (let skip = 0; skip < 20000; skip += take) {
+      const page = await serviceJson(
+        'seerr',
+        `/api/v1/request?take=${take}&skip=${skip}&filter=all&sort=added&sortDirection=desc`,
+      );
+      const results = Array.isArray(page) ? page : page.results;
+      if (!Array.isArray(results)) throw new Error('Seerr returned requests in an unexpected format.');
+      if (knownSeerrRequestIds === null) {
+        knownSeerrRequestIds = new Set(results.map(seerrRequestIdentity));
+        return;
+      }
+
+      for (const request of results) {
+        const id = seerrRequestIdentity(request);
+        if (knownSeerrRequestIds.has(id)) {
+          foundKnownRequest = true;
+          break;
+        }
+        newRequestIds.push(id);
+      }
+      if (foundKnownRequest || results.length < take) break;
+      if (skip + take >= 20000) {
+        throw new Error('Seerr has more than 20,000 requests; the sync limit was reached.');
+      }
+    }
+
+    if (newRequestIds.length) {
+      knownSeerrRequestIds = new Set([...newRequestIds, ...knownSeerrRequestIds].slice(0, 20000));
+      scheduleStorageNotificationCheck('a new Seerr request');
+    }
+  })().finally(() => {
+    seerrRequestPollPromise = null;
+  });
+  return seerrRequestPollPromise;
+}
+
+function createSeerrRequestPollingTimer() {
+  return setInterval(() => {
+    void checkForNewSeerrRequests().catch((error) => {
+      console.error(`Could not check for new Seerr requests: ${error.message}`);
+    });
+  }, settings.seerrPollingIntervalMinutes * 60 * 1000).unref();
+}
+
+function configureSeerrRequestPolling() {
+  if (!seerrRequestPollingTimer) return;
+  clearInterval(seerrRequestPollingTimer);
+  seerrRequestPollingTimer = createSeerrRequestPollingTimer();
+}
+
 async function fetchUsers() {
   const all = [];
   const take = 100;
@@ -832,6 +917,15 @@ async function saveClientSettings(request) {
   const capsChanged = Object.keys(caps).length !== Object.keys(currentCaps).length
     || Object.entries(caps).some(([profileId, cap]) => Number(currentCaps[profileId]) !== cap);
   const pageSize = [10, 25, 50, 100].includes(Number(body.pageSize)) ? Number(body.pageSize) : settings.pageSize;
+  const seerrPollingIntervalMinutes = body.seerrPollingIntervalMinutes === undefined
+    ? settings.seerrPollingIntervalMinutes
+    : Number(body.seerrPollingIntervalMinutes);
+  if (!Number.isInteger(seerrPollingIntervalMinutes)
+    || seerrPollingIntervalMinutes < 1
+    || seerrPollingIntervalMinutes > 1440) {
+    throw new Error('Seerr polling interval must be a whole number between 1 and 1,440 minutes.');
+  }
+  const pollingIntervalChanged = seerrPollingIntervalMinutes !== settings.seerrPollingIntervalMinutes;
   let notifications = settings.notifications;
   if (body.notifications && typeof body.notifications === 'object') {
     const submittedNotifications = body.notifications;
@@ -882,9 +976,18 @@ async function saveClientSettings(request) {
       providers,
     };
   }
-  settings = { ...settings, services, defaultCategory, caps, pageSize, notifications };
+  settings = {
+    ...settings,
+    services,
+    defaultCategory,
+    caps,
+    pageSize,
+    seerrPollingIntervalMinutes,
+    notifications,
+  };
   await saveSettings(settings);
   if (capsChanged) scheduleStorageNotificationCheck('a storage cap update');
+  if (pollingIntervalChanged) configureSeerrRequestPolling();
   return safeSettings();
 }
 
@@ -1432,6 +1535,10 @@ if (require.main === module) {
           console.error(`Could not check storage notification thresholds: ${error.message}`);
         });
       }, 5 * 60 * 1000).unref();
+      void checkForNewSeerrRequests().catch((error) => {
+        console.error(`Could not check for new Seerr requests: ${error.message}`);
+      });
+      seerrRequestPollingTimer = createSeerrRequestPollingTimer();
     })
     .catch((error) => {
       console.error(`Could not load local settings: ${error.message}`);
@@ -1439,4 +1546,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { checkStorageNotifications, loadSettings, server };
+module.exports = { checkForNewSeerrRequests, checkStorageNotifications, loadSettings, server };

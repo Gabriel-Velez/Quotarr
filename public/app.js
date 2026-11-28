@@ -919,6 +919,7 @@ async function loadSettings() {
   });
   byId("default-category").value = state.settings.defaultCategory || "Unrequested";
   byId("page-size").value = String(state.settings.pageSize || 25);
+  byId("seerr-polling-interval").value = String(state.settings.seerrPollingIntervalMinutes || 1);
   renderCapList(state.dashboard?.profiles || [], state.settings.caps);
   loadNotificationSettings();
 }
@@ -944,6 +945,7 @@ async function saveSettings(sync) {
         defaultCategory: byId("default-category").value,
         caps,
         pageSize: Number(byId("page-size").value),
+        seerrPollingIntervalMinutes: Number(byId("seerr-polling-interval").value),
         notifications: notificationSettingsFromForm(),
       }),
     });
